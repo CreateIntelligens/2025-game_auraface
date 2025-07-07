@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraFace WebSocket 測試</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        .processing { background-color: #fff3cd; color: #856404; }
+        
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #6c757d; }
+        
+        #fileInput {
+            margin: 10px 0;
+            padding: 10px;
+            border: 2px dashed #ddd;
+            border-radius: 5px;
+        }
+        
+        #results {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        
+        .face-result {
+            background: white;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 5px;
+            border-left: 4px solid #ddd;
+        }
+        .face-unknown { border-left-color: #dc3545; }
+        .face-employee { border-left-color: #28a745; }
+        .face-visitor { border-left-color: #ffc107; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 AuraFace WebSocket 測試</h1>
+        
+        <div id="status" class="status disconnected">
+            ❌ 未連接到 WebSocket 服務器
+        </div>
+        
+        <div>
+            <button id="connectBtn" onclick="connect()">連接 WebSocket</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>斷開連接</button>
+        </div>
+        
+        <div>
+            <h3>📷 上傳圖片測試</h3>
+            <input type="file" id="fileInput" accept="image/*" onchange="handleFileSelect(event)">
+            <button id="testBtn" onclick="sendTestImage()" disabled>發送測試圖片</button>
+        </div>
+        
+        <div>
+            <h3>📊 服務統計</h3>
+            <button id="statsBtn" onclick="getStats()" disabled>獲取統計</button>
+        </div>
+        
+        <div id="results">等待測試結果...</div>
+    </div>
+
+    <script>
+        let ws = null;
+        let currentImageData = null;
+        
+        function updateStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = 'status ' + type;
+        }
+        
+        function updateButtons(connected) {
+            document.getElementById('connectBtn').disabled = connected;
+            document.getElementById('disconnectBtn').disabled = !connected;
+            document.getElementById('testBtn').disabled = !connected || !currentImageData;
+            document.getElementById('statsBtn').disabled = !connected;
+        }
+        
+        function connect() {
+            try {
+                updateStatus('⏳ 正在連接...', 'processing');
+                ws = new WebSocket('ws://localhost:8765');
+                
+                ws.onopen = function(event) {
+                    updateStatus('✅ 已連接到 WebSocket 服務器', 'connected');
+                    updateButtons(true);
+                    addResult('📡 WebSocket 連接建立成功');
+                };
+                
+                ws.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleMessage(data);
+                        updateStatus('✅ 已連接到 WebSocket 服務器', 'connected');
+                    } catch (e) {
+                        addResult('❌ 解析消息錯誤: ' + e);
+                    }
+                };
+                
+                ws.onclose = function(event) {
+                    updateStatus('❌ WebSocket 連接已斷開 (代碼: ' + event.code + ')', 'disconnected');
+                    updateButtons(false);
+                    addResult('📡 WebSocket 連接斷開 - 代碼: ' + event.code + ', 原因: ' + (event.reason || '未知'));
+                };
+                
+                ws.onerror = function(error) {
+                    updateStatus('❌ WebSocket 連接錯誤', 'disconnected');
+                    addResult('❌ 連接錯誤: ' + error);
+                    console.error('WebSocket 錯誤:', error);
+                };
+                
+            } catch (error) {
+                updateStatus('❌ 無法連接到 WebSocket', 'disconnected');
+                addResult('❌ 連接失敗: ' + error);
+            }
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+        
+        function handleMessage(data) {
+            switch(data.type) {
+                case 'connection_status':
+                    addResult('📨 服務器消息: ' + data.message);
+                    break;
+                    
+                case 'recognition_result':
+                    handleRecognitionResult(data);
+                    break;
+                    
+                case 'stats':
+                    handleStats(data.data);
+                    break;
+                    
+                default:
+                    addResult('📨 收到消息: ' + JSON.stringify(data, null, 2));
+            }
+        }
+        
+        function handleRecognitionResult(data) {
+            addResult('🎯 識別結果:');
+            addResult('   處理時間: ' + data.processing_time + ' ms');
+            addResult('   FPS: ' + data.fps);
+            addResult('   檢測到 ' + data.faces.length + ' 張人臉:');
+            
+            const resultsDiv = document.getElementById('results');
+            
+            data.faces.forEach((face, index) => {
+                const faceDiv = document.createElement('div');
+                faceDiv.className = 'face-result';
+                
+                if (face.person_id === 'unknown') {
+                    faceDiv.classList.add('face-unknown');
+                    faceDiv.innerHTML = `
+                        <strong>人臉 ${index + 1}: 🔴 未識別</strong><br>
+                        person_id: "${face.person_id}"<br>
+                        name: "${face.name}"<br>
+                        role: "${face.role}"<br>
+                        confidence: ${face.confidence.toFixed(3)}<br>
+                        <em>顯示效果: 紅框，無文字標籤</em>
+                    `;
+                } else {
+                    const colorClass = face.role === '員工' ? 'face-employee' : 'face-visitor';
+                    const colorEmoji = face.role === '員工' ? '🟢' : '🟡';
+                    faceDiv.classList.add(colorClass);
+                    faceDiv.innerHTML = `
+                        <strong>人臉 ${index + 1}: ${colorEmoji} 已識別</strong><br>
+                        person_id: "${face.person_id}"<br>
+                        name: "${face.name}"<br>
+                        role: "${face.role}"<br>
+                        confidence: ${face.confidence.toFixed(3)}<br>
+                        <em>顯示效果: ${face.role === '員工' ? '綠' : '黃'}框 + [${face.role === '員工' ? 'Staff' : 'Visitor'}] ${face.name} ${face.confidence.toFixed(2)}</em>
+                    `;
+                }
+                
+                resultsDiv.appendChild(faceDiv);
+            });
+            
+            resultsDiv.scrollTop = resultsDiv.scrollHeight;
+        }
+        
+        function handleStats(stats) {
+            addResult('📊 服務統計:');
+            addResult('   總幀數: ' + stats.total_frames);
+            addResult('   檢測到人臉: ' + stats.faces_detected);
+            addResult('   員工: ' + stats.employees_detected);
+            addResult('   訪客: ' + stats.visitors_detected);
+            addResult('   未知: ' + stats.unknown_detected);
+        }
+        
+        function addResult(text) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.textContent += new Date().toLocaleTimeString() + ' - ' + text + '\n';
+            resultsDiv.scrollTop = resultsDiv.scrollHeight;
+        }
+        
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file && file.type.startsWith('image/')) {
+                // 檢查文件大小
+                const fileSizeMB = file.size / (1024 * 1024);
+                addResult('📁 圖片文件大小: ' + fileSizeMB.toFixed(2) + ' MB');
+                
+                if (fileSizeMB > 5) {
+                    addResult('⚠️ 圖片過大，正在壓縮...');
+                }
+                
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    if (fileSizeMB > 5) {
+                        // 壓縮圖片
+                        compressImage(e.target.result, function(compressedData) {
+                            currentImageData = compressedData;
+                            updateButtons(ws && ws.readyState === WebSocket.OPEN);
+                            addResult('📁 圖片已壓縮並加載: ' + file.name);
+                        });
+                    } else {
+                        currentImageData = e.target.result;
+                        updateButtons(ws && ws.readyState === WebSocket.OPEN);
+                        addResult('📁 圖片已加載: ' + file.name);
+                    }
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+        
+        function compressImage(dataURL, callback) {
+            const img = new Image();
+            img.onload = function() {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                // 計算新尺寸（最大 800px）
+                let { width, height } = img;
+                const maxSize = 800;
+                
+                if (width > height && width > maxSize) {
+                    height = (height * maxSize) / width;
+                    width = maxSize;
+                } else if (height > maxSize) {
+                    width = (width * maxSize) / height;
+                    height = maxSize;
+                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                
+                // 繪製壓縮後的圖片
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // 轉換為 base64 (0.7 品質)
+                const compressedDataURL = canvas.toDataURL('image/jpeg', 0.7);
+                callback(compressedDataURL);
+            };
+            img.src = dataURL;
+        }
+        
+        function sendTestImage() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addResult('❌ WebSocket 未連接');
+                return;
+            }
+            
+            if (!currentImageData) {
+                addResult('❌ 請先選擇圖片');
+                return;
+            }
+            
+            updateStatus('⏳ 正在處理圖片...', 'processing');
+            
+            const message = {
+                type: 'video_frame',
+                image: currentImageData
+            };
+            
+            ws.send(JSON.stringify(message));
+            addResult('📤 已發送圖片進行識別...');
+        }
+        
+        function getStats() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addResult('❌ WebSocket 未連接');
+                return;
+            }
+            
+            const message = {type: 'get_stats'};
+            ws.send(JSON.stringify(message));
+            addResult('📤 請求服務統計...');
+        }
+    </script>
+</body>
+</html>

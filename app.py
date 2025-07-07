@@ -468,47 +468,184 @@ def start_webcam_stream():
     return "攝像頭串流功能需要額外的權限設定，請使用影片上傳功能進行測試。"
 
 def get_database_info():
-    """取得資料庫資訊"""
+    """取得資料庫資訊（舊版本，保持兼容）"""
+    return get_database_stats()
+
+def get_database_stats():
+    """取得資料庫統計"""
     try:
         if face_db.use_postgres:
-            # PostgreSQL 模式
-            stats = face_db.db.get_statistics()
-            all_faces = face_db.db.get_all_faces()
-            total_faces = stats['total']
-            employees = stats['employees']
-            visitors = stats['visitors']
+            cursor = face_db.db.conn.cursor()
             
-            info_text = f"🐘 PostgreSQL + pgvector 資料庫\n"
-            info_text += f"資料庫統計：\n"
-            info_text += f"總人數：{total_faces}\n"
-            info_text += f"員工：{employees}\n"
-            info_text += f"訪客：{visitors}\n\n"
+            # 用戶統計
+            cursor.execute("SELECT COUNT(*) FROM face_profiles")
+            total_users = cursor.fetchone()[0]
             
-            if total_faces > 0:
-                info_text += "已註冊人員：\n"
-                for person_id, info in all_faces.items():
-                    info_text += f"- {info['name']} ({info['role']}) {info.get('department', '')}\n"
+            cursor.execute("SELECT COUNT(*) FROM face_profiles WHERE role = '員工'")
+            employees = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM face_profiles WHERE role = '訪客'")
+            visitors = cursor.fetchone()[0]
+            
+            # 識別統計
+            cursor.execute("SELECT COUNT(*) FROM recognition_logs")
+            total_recognitions = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM recognition_logs WHERE recognition_time > NOW() - INTERVAL '24 hours'")
+            today_recognitions = cursor.fetchone()[0]
+            
+            cursor.close()
+            
+            stats = f"""📊 資料庫統計
+            
+👥 用戶統計：
+• 總用戶數：{total_users}
+• 員工：{employees}
+• 訪客：{visitors}
+
+🔍 識別統計：
+• 總識別次數：{total_recognitions}
+• 今日識別次數：{today_recognitions}
+"""
+            return stats
         else:
-            # JSON 模式
             total_faces = len(face_db.faces)
             employees = sum(1 for info in face_db.faces.values() if info['role'] == '員工')
             visitors = total_faces - employees
             
-            info_text = f"📁 JSON 檔案資料庫\n"
-            info_text += f"資料庫統計：\n"
-            info_text += f"總人數：{total_faces}\n"
-            info_text += f"員工：{employees}\n"
-            info_text += f"訪客：{visitors}\n\n"
+            return f"""📁 JSON 檔案資料庫
             
-            if total_faces > 0:
-                info_text += "已註冊人員：\n"
-                for person_id, info in face_db.faces.items():
-                    info_text += f"- {info['name']} ({info['role']}) {info.get('department', '')}\n"
-        
-        return info_text
-        
+👥 用戶統計：
+• 總用戶數：{total_faces}
+• 員工：{employees}
+• 訪客：{visitors}
+"""
     except Exception as e:
-        return f"資料庫查詢錯誤: {str(e)}"
+        return f"統計錯誤: {str(e)}"
+
+def get_all_users():
+    """取得所有用戶"""
+    try:
+        if face_db.use_postgres:
+            all_faces = face_db.db.get_all_faces()
+            users = []
+            for person_id, info in all_faces.items():
+                users.append([
+                    person_id,
+                    info['name'],
+                    info['role'],
+                    info.get('department', ''),
+                    info.get('register_time', '')
+                ])
+            return users
+        else:
+            users = []
+            for person_id, info in face_db.faces.items():
+                users.append([
+                    person_id,
+                    info['name'],
+                    info['role'],
+                    info.get('department', ''),
+                    info.get('register_time', '')
+                ])
+            return users
+    except Exception as e:
+        return [["錯誤", str(e), "", "", ""]]
+
+def update_user(person_id, name, role, department):
+    """更新用戶資訊"""
+    try:
+        if not person_id:
+            return "請選擇要更新的用戶"
+        
+        if face_db.use_postgres:
+            cursor = face_db.db.conn.cursor()
+            cursor.execute("""
+                UPDATE face_profiles 
+                SET name = %s, role = %s, department = %s, updated_at = NOW()
+                WHERE person_id = %s
+            """, (name, role, department, person_id))
+            face_db.db.conn.commit()
+            cursor.close()
+            
+            return f"用戶 {person_id} 更新成功"
+        else:
+            if person_id in face_db.faces:
+                face_db.faces[person_id]['name'] = name
+                face_db.faces[person_id]['role'] = role
+                face_db.faces[person_id]['department'] = department
+                face_db.save_faces()
+                return f"用戶 {person_id} 更新成功"
+            else:
+                return "用戶不存在"
+    except Exception as e:
+        return f"更新失敗: {str(e)}"
+
+def delete_user(person_id):
+    """刪除用戶"""
+    try:
+        if not person_id:
+            return "請選擇要刪除的用戶"
+        
+        if face_db.use_postgres:
+            cursor = face_db.db.conn.cursor()
+            cursor.execute("DELETE FROM face_profiles WHERE person_id = %s", (person_id,))
+            face_db.db.conn.commit()
+            cursor.close()
+            
+            return f"用戶 {person_id} 刪除成功"
+        else:
+            if person_id in face_db.faces:
+                del face_db.faces[person_id]
+                face_db.save_faces()
+                return f"用戶 {person_id} 刪除成功"
+            else:
+                return "用戶不存在"
+    except Exception as e:
+        return f"刪除失敗: {str(e)}"
+
+def get_recognition_logs():
+    """取得識別日誌"""
+    try:
+        if face_db.use_postgres:
+            cursor = face_db.db.conn.cursor()
+            cursor.execute("""
+                SELECT person_id, recognized_name, confidence, image_source, recognition_time
+                FROM recognition_logs 
+                ORDER BY recognition_time DESC 
+                LIMIT 50
+            """)
+            logs = cursor.fetchall()
+            cursor.close()
+            
+            result = []
+            for log in logs:
+                result.append([
+                    log[0],  # person_id
+                    log[1],  # recognized_name
+                    f"{log[2]:.3f}",  # confidence
+                    log[3],  # image_source
+                    log[4].strftime("%Y-%m-%d %H:%M:%S")  # recognition_time
+                ])
+            return result
+        else:
+            return [["JSON模式", "不支援日誌", "", "", ""]]
+    except Exception as e:
+        return [["錯誤", str(e), "", "", ""]]
+
+def clear_logs():
+    """清除識別日誌"""
+    try:
+        if face_db.use_postgres:
+            cursor = face_db.db.conn.cursor()
+            cursor.execute("DELETE FROM recognition_logs")
+            face_db.db.conn.commit()
+            cursor.close()
+            return "日誌清除成功"
+        else:
+            return "JSON模式不支援日誌清除"
+    except Exception as e:
+        return f"清除失敗: {str(e)}"
 
 # 建立 Gradio 介面
 with gr.Blocks(title="AuraFace 智能識別系統") as demo:
@@ -562,19 +699,82 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
         
         # 資料庫管理頁面
         with gr.TabItem("📊 資料庫管理"):
-            gr.Markdown("## 資料庫資訊")
+            gr.Markdown("## 資料庫管理")
             
-            with gr.Row():
-                with gr.Column():
-                    refresh_btn = gr.Button("刷新資訊", variant="secondary")
+            with gr.Tabs():
+                # 資料庫統計
+                with gr.TabItem("📈 統計資訊"):
+                    with gr.Row():
+                        refresh_stats_btn = gr.Button("刷新統計", variant="secondary")
+                    
+                    db_stats = gr.Textbox(label="資料庫統計", lines=10, value=get_database_stats())
+                    refresh_stats_btn.click(get_database_stats, outputs=db_stats)
                 
-                with gr.Column():
-                    db_info = gr.Textbox(label="資料庫統計", lines=10, value=get_database_info())
+                # 用戶管理
+                with gr.TabItem("👥 用戶管理"):
+                    with gr.Row():
+                        with gr.Column():
+                            refresh_users_btn = gr.Button("刷新用戶列表", variant="secondary")
+                            user_table = gr.Dataframe(
+                                headers=["用戶ID", "姓名", "身分", "部門", "註冊時間"],
+                                datatype=["str", "str", "str", "str", "str"],
+                                value=get_all_users(),
+                                interactive=False
+                            )
+                        
+                        with gr.Column():
+                            gr.Markdown("### 編輯用戶")
+                            edit_person_id = gr.Textbox(label="用戶ID", placeholder="點擊表格行選擇用戶")
+                            edit_name = gr.Textbox(label="姓名")
+                            edit_role = gr.Dropdown(choices=["員工", "訪客"], label="身分")
+                            edit_department = gr.Textbox(label="部門")
+                            
+                            with gr.Row():
+                                update_btn = gr.Button("更新用戶", variant="primary")
+                                delete_btn = gr.Button("刪除用戶", variant="stop")
+                            
+                            user_operation_result = gr.Textbox(label="操作結果", lines=2)
+                
+                # 識別日誌
+                with gr.TabItem("📋 識別日誌"):
+                    with gr.Row():
+                        refresh_logs_btn = gr.Button("刷新日誌", variant="secondary")
+                        clear_logs_btn = gr.Button("清除日誌", variant="stop")
+                    
+                    log_table = gr.Dataframe(
+                        headers=["用戶ID", "識別姓名", "信心度", "來源", "識別時間"],
+                        datatype=["str", "str", "str", "str", "str"],
+                        value=get_recognition_logs(),
+                        interactive=False
+                    )
+                    
+                    log_operation_result = gr.Textbox(label="操作結果", lines=2)
             
-            refresh_btn.click(
-                get_database_info,
-                outputs=db_info
-            )
+            # 事件綁定
+            def select_user(evt: gr.SelectData):
+                row = evt.index[0]
+                users = get_all_users()
+                if row < len(users):
+                    user = users[row]
+                    return user[0], user[1], user[2], user[3]
+                return "", "", "", ""
+            
+            user_table.select(select_user, outputs=[edit_person_id, edit_name, edit_role, edit_department])
+            
+            refresh_users_btn.click(get_all_users, outputs=user_table)
+            update_btn.click(
+                update_user,
+                inputs=[edit_person_id, edit_name, edit_role, edit_department],
+                outputs=user_operation_result
+            ).then(get_all_users, outputs=user_table)
+            delete_btn.click(
+                delete_user,
+                inputs=edit_person_id,
+                outputs=user_operation_result
+            ).then(get_all_users, outputs=user_table)
+            
+            refresh_logs_btn.click(get_recognition_logs, outputs=log_table)
+            clear_logs_btn.click(clear_logs, outputs=log_operation_result).then(get_recognition_logs, outputs=log_table)
         
         # 影片處理頁面
         with gr.TabItem("🎬 影片處理"):

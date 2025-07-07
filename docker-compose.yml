@@ -22,7 +22,7 @@ services:
     container_name: auraface-app
     ports:
       - "7860:7860"
-      - "8765:8765"
+      - "7861:8765"
     environment:
       - DATABASE_URL=postgresql://auraface:auraface123@postgres:5432/auraface
       - PYTHONPATH=/app
@@ -30,10 +30,9 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./database:/app/database
-      - ./logs:/app/logs
-      - ./models:/app/models
+      - .:/app
     restart: unless-stopped
+    command: sh -c "python3 websocket_realtime.py & python3 app.py"
 
 volumes:
   postgres_data:
