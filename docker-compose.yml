@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: auraface-postgres
+    environment:
+      POSTGRES_DB: auraface
+      POSTGRES_USER: auraface
+      POSTGRES_PASSWORD: auraface123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auraface"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  auraface:
+    build: .
+    container_name: auraface-app
+    ports:
+      - "7860:7860"
+      - "8765:8765"
+    environment:
+      - DATABASE_URL=postgresql://auraface:auraface123@postgres:5432/auraface
+      - PYTHONPATH=/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./database:/app/database
+      - ./logs:/app/logs
+      - ./models:/app/models
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

@@ -1,0 +1,14 @@
+numpy==1.24.3
+gradio==3.50.2
+huggingface_hub==0.25.0
+insightface==0.7.3
+opencv-python-headless==4.8.1.78
+onnxruntime==1.16.3
+datasets==2.14.7
+httpx[socks]
+Pillow==10.0.1
+fastapi==0.104.1
+pydantic==1.10.14
+psycopg2-binary==2.9.7
+pgvector==0.2.4
+websockets==11.0.3
