@@ -41,7 +41,7 @@ COPY realtime_client.html .
 RUN mkdir -p examples/xiangxiang_man database logs models
 
 # Expose ports
-EXPOSE 7860 8765
+EXPOSE 7860 7861
 
 # Run the main application
 CMD ["python", "app.py"]

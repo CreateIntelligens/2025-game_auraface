@@ -816,7 +816,7 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                     
                     stream_info = gr.Textbox(
                         label="伺服器狀態", 
-                        value="WebSocket 伺服器位址: ws://localhost:8765", 
+                        value="WebSocket 伺服器位址: ws://localhost:7861", 
                         lines=3
                     )
                 

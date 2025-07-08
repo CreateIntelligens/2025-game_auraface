@@ -328,13 +328,16 @@ async def main():
     """啟動 WebSocket 伺服器"""
     recognizer = RealtimeFaceRecognition()
     
+    # 從環境變數讀取端口
+    ws_port = int(os.getenv('WEBSOCKET_PORT', 8765))
+    
     print("🚀 啟動 WebSocket 即時人臉識別伺服器...")
-    print("📡 WebSocket 伺服器位址: ws://localhost:8765")
+    print(f"📡 WebSocket 伺服器位址: ws://localhost:{ws_port}")
     
     start_server = websockets.serve(
         recognizer.register, 
         "0.0.0.0", 
-        8765,
+        ws_port,
         max_size=10 * 1024 * 1024,  # 10MB 消息大小限制
         ping_interval=20,
         ping_timeout=10

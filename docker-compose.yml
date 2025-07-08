@@ -3,9 +3,9 @@ services:
     image: pgvector/pgvector:pg16
     container_name: auraface-postgres
     environment:
-      POSTGRES_DB: auraface
-      POSTGRES_USER: auraface
-      POSTGRES_PASSWORD: auraface123
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -22,10 +22,11 @@ services:
     container_name: auraface-app
     ports:
       - "7860:7860"
-      - "7861:8765"
+      - "7861:7861"
     environment:
-      - DATABASE_URL=postgresql://auraface:auraface123@postgres:5432/auraface
-      - PYTHONPATH=/app
+      - DATABASE_URL=${DATABASE_URL}
+      - PYTHONPATH=${PYTHONPATH}
+      - WEBSOCKET_PORT=${WEBSOCKET_PORT}
     depends_on:
       postgres:
         condition: service_healthy

@@ -235,7 +235,7 @@
         // WebSocket 連接
         function connectWebSocket() {
             try {
-                websocket = new WebSocket('ws://localhost:8765');
+                websocket = new WebSocket('ws://localhost:7861');
                 
                 websocket.onopen = function(event) {
                     connectionStatus.textContent = '已連接到伺服器';

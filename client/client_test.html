@@ -114,7 +114,7 @@
         function connect() {
             try {
                 updateStatus('⏳ 正在連接...', 'processing');
-                ws = new WebSocket('ws://localhost:8765');
+                ws = new WebSocket('ws://localhost:7861');
                 
                 ws.onopen = function(event) {
                     updateStatus('✅ 已連接到 WebSocket 服務器', 'connected');
