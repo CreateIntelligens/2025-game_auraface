@@ -69,7 +69,7 @@ class PostgresFaceDatabase:
         with open(self.database_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     
-    def register_face(self, name, role, department, embedding):
+    def register_face(self, name, role, department, embedding, employee_id=None):
         """註冊新人臉"""
         try:
             person_id = f"{role}_{len(self.get_all_faces()):04d}"
@@ -80,6 +80,7 @@ class PostgresFaceDatabase:
                     'name': name,
                     'role': role,
                     'department': department,
+                    'employee_id': employee_id,
                     'register_time': datetime.now().isoformat(),
                     'embedding': embedding
                 }
@@ -89,9 +90,9 @@ class PostgresFaceDatabase:
             # PostgreSQL 模式
             with self.conn.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO face_profiles (person_id, name, role, department, face_embedding)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (person_id, name, role, department, embedding.tolist()))
+                    INSERT INTO face_profiles (person_id, employee_id, name, role, department, face_embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (person_id, employee_id, name, role, department, embedding.tolist()))
                 self.conn.commit()
             
             return True, f"成功註冊 {name}（ID: {person_id}）"
@@ -160,7 +161,7 @@ class PostgresFaceDatabase:
             
             with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT person_id, name, role, department, register_time
+                    SELECT person_id, employee_id, name, role, department, register_time
                     FROM face_profiles
                     ORDER BY register_time DESC
                 """)
@@ -171,6 +172,7 @@ class PostgresFaceDatabase:
                         'name': row['name'],
                         'role': row['role'],
                         'department': row['department'] or '',
+                        'employee_id': row['employee_id'] or '',
                         'register_time': row['register_time'].isoformat() if row['register_time'] else ''
                     }
                 
@@ -192,6 +194,60 @@ class PostgresFaceDatabase:
             'employees': employees,
             'visitors': visitors
         }
+
+    def update_face(self, person_id, name, role, department):
+        """更新現有人臉資料"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                # JSON 模式
+                if person_id in self.faces:
+                    self.faces[person_id]['name'] = name
+                    self.faces[person_id]['role'] = role
+                    self.faces[person_id]['department'] = department
+                    self.save_json_database()
+                    return True, f"成功更新 {name}"
+                return False, "找不到指定人員"
+
+            # PostgreSQL 模式
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE face_profiles
+                    SET name = %s, role = %s, department = %s
+                    WHERE person_id = %s
+                """, (name, role, department, person_id))
+                self.conn.commit()
+                if cursor.rowcount == 0:
+                    return False, f"找不到 ID 為 {person_id} 的人員"
+            return True, f"成功更新 ID {person_id} 的資料"
+        except Exception as e:
+            if self.conn:
+                self.conn.rollback()
+            return False, f"更新失敗：{str(e)}"
+
+    def delete_face(self, person_id):
+        """刪除指定人臉"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                # JSON 模式
+                if person_id in self.faces:
+                    del self.faces[person_id]
+                    self.save_json_database()
+                    return True, f"成功刪除人員"
+                return False, "找不到指定人員"
+
+            # PostgreSQL 模式
+            with self.conn.cursor() as cursor:
+                # 也需要刪除相關的日誌
+                cursor.execute("DELETE FROM recognition_logs WHERE person_id = %s", (person_id,))
+                cursor.execute("DELETE FROM face_profiles WHERE person_id = %s", (person_id,))
+                self.conn.commit()
+                if cursor.rowcount == 0:
+                    return False, f"找不到 ID 為 {person_id} 的人員"
+            return True, f"成功刪除 ID {person_id} 及其相關日誌"
+        except Exception as e:
+            if self.conn:
+                self.conn.rollback()
+            return False, f"刪除失敗：{str(e)}"
     
     def log_recognition(self, person_id, recognized_name, confidence, image_source="unknown"):
         """記錄識別日誌"""

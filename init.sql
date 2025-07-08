@@ -5,6 +5,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS face_profiles (
     id SERIAL PRIMARY KEY,
     person_id VARCHAR(50) UNIQUE NOT NULL,
+    employee_id VARCHAR(50),  -- 員工編號
     name VARCHAR(100) NOT NULL,
     role VARCHAR(20) NOT NULL CHECK (role IN ('員工', '訪客')),
     department VARCHAR(100),

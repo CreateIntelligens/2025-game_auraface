@@ -38,11 +38,11 @@ if not os.path.exists("models/auraface"):
 print("正在初始化 AuraFace...")
 app = FaceAnalysis(
     name="auraface",
-    providers=["CPUExecutionProvider"],
+    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],  # GPU優先
     root=".",
 )
-app.prepare(ctx_id=0, det_size=(640, 640))
-print("AuraFace 初始化完成！")
+app.prepare(ctx_id=0, det_size=(320, 320))  # 降低解析度提升性能
+print("✅ AuraFace GPU加速初始化完成！")
 
 # 匯入資料庫管理器
 try:

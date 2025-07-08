@@ -1,6 +1,10 @@
+.claude/
+Claude.md
+
 # Test data (保留幾個示例，忽略大量測試檔案)
 test_data/
-.claude/
+tests/
+HARDWARE_REQUIREMENTS.md
 
 # Python
 __pycache__/

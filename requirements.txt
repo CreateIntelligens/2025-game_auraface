@@ -3,7 +3,7 @@ gradio==3.50.2
 huggingface_hub==0.25.0
 insightface==0.7.3
 opencv-python-headless==4.8.1.78
-onnxruntime==1.16.3
+onnxruntime-gpu==1.16.3
 datasets==2.14.7
 httpx[socks]
 Pillow==10.0.1

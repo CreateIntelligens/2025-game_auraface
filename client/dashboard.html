@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraFace 統一管理儀表板 (單機版)</title>
+    <style>
+        :root {
+            --primary-color: #007bff; --success-color: #28a745; --danger-color: #dc3545;
+            --warning-color: #ffc107; --info-color: #17a2b8; --light-gray: #f8f9fa;
+            --dark-gray: #343a40; --border-color: #dee2e6;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0; background-color: #f4f7f9; color: #333;
+            display: flex; flex-direction: column; align-items: center;
+        }
+        .header {
+            width: 100%; background-color: var(--dark-gray); color: white;
+            padding: 15px 30px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .main-container {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+            padding: 20px; width: 100%; max-width: 1600px;
+        }
+        .card {
+            background: white; padding: 20px; border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.05); display: flex; flex-direction: column;
+        }
+        .card-title {
+            font-size: 1.5em; font-weight: 600; margin-bottom: 15px;
+            border-bottom: 2px solid var(--primary-color); padding-bottom: 10px;
+        }
+        #realtime-container { grid-column: 1 / 2; }
+        #management-container { grid-column: 2 / 3; grid-row: 1 / 3; }
+        #stats-container { grid-column: 1 / 2; }
+        video, canvas { width: 100%; height: auto; border-radius: 5px; background-color: #000; }
+        .video-wrapper { position: relative; }
+        #overlayCanvas { position: absolute; top: 0; left: 0; pointer-events: none; background: transparent; }
+        button {
+            padding: 10px 15px; margin: 5px; border: none; border-radius: 5px;
+            cursor: pointer; font-size: 1em; transition: background-color 0.2s;
+            outline: none; /* Attempt to remove unexpected white border on focus */
+        }
+        .btn-primary { background-color: var(--primary-color); color: white; }
+        .btn-danger { background-color: var(--danger-color); color: white; }
+        .btn-success { background-color: var(--success-color); color: white; }
+        .btn-info { background-color: var(--info-color); color: white; }
+        .btn-warning { background-color: var(--warning-color); color: black; }
+        button:hover { opacity: 0.85; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; border: 1px solid var(--border-color); text-align: left; }
+        th { background-color: var(--light-gray); font-weight: 600; }
+        .modal {
+            display: none; position: fixed; z-index: 1000; left: 0; top: 0;
+            width: 100%; height: 100%; background-color: rgba(0,0,0,0.5);
+            justify-content: center; align-items: center;
+        }
+        .modal-content { background: white; padding: 30px; border-radius: 8px; width: 90%; max-width: 500px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; }
+        input, select { width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 5px; font-size: 1em; }
+        .modal-actions { text-align: right; margin-top: 20px; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid; }
+        .status-connected { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
+        .status-disconnected { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; }
+    </style>
+</head>
+<body>
+
+    <header class="header"><h1>AuraFace 統一管理儀表板</h1></header>
+
+    <div class="main-container">
+        <div id="realtime-container" class="card">
+            <h2 class="card-title">📹 即時監控與註冊</h2>
+            <div id="connectionStatus" class="status status-disconnected">未連接</div>
+            <div class="controls">
+                <button id="connectWS" class="btn-success">連接</button>
+                <button id="startCamera" class="btn-primary">啟動鏡頭</button>
+                <button id="stopCamera" class="btn-danger" disabled>停止鏡頭</button>
+            </div>
+            <div class="video-wrapper">
+                <video id="videoElement" autoplay muted playsinline></video>
+                <canvas id="overlayCanvas"></canvas>
+            </div>
+            <div id="realtimeStats" style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 15px; min-height: 100px;">
+                <div><strong>即時識別結果</strong></div>
+                <div>等待識別結果...</div>
+            </div>
+            <div id="recognitionInfo" style="margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 5px; font-family: monospace; font-size: 14px;">
+                等待識別結果...
+            </div>
+            <div class="register-form" style="margin-top: 20px;">
+                <div class="form-group"><label for="personName">姓名：</label><input type="text" id="personName"></div>
+                <div class="form-group"><label for="personEmployeeId">員工編號：</label><input type="text" id="personEmployeeId" placeholder="選填"></div>
+                <div class="form-group"><label for="personRole">身分：</label><select id="personRole"><option value="員工">員工</option><option value="訪客">訪客</option></select></div>
+                <div class="form-group"><label for="personDept">部門：</label><input type="text" id="personDept"></div>
+                <button id="captureRegister" class="btn-success">拍照註冊</button>
+            </div>
+        </div>
+
+        <div id="stats-container" class="card">
+            <h2 class="card-title">📊 系統統計</h2>
+            <div id="stats-content">等待資料...</div>
+        </div>
+
+        <div id="management-container" class="card">
+            <h2 class="card-title">👥 人員資料管理</h2>
+            <button id="refreshPersons" class="btn-info">🔄 刷新列表</button>
+            <div style="overflow-x: auto; max-height: 80vh;">
+                <table id="personsTable">
+                    <thead><tr><th>ID</th><th>姓名</th><th>身分</th><th>部門</th><th>操作</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <h2 class="card-title">✏️ 修改人員資料</h2>
+            <input type="hidden" id="editPersonId">
+            <div class="form-group"><label for="editPersonName">姓名：</label><input type="text" id="editPersonName"></div>
+            <div class="form-group"><label for="editPersonRole">身分：</label><select id="editPersonRole"><option value="員工">員工</option><option value="訪客">訪客</option></select></div>
+            <div class="form-group"><label for="editPersonDept">部門：</label><input type="text" id="editPersonDept"></div>
+            <div class="modal-actions">
+                <button id="saveChanges" class="btn-success">儲存</button>
+                <button id="closeModal" class="btn-danger">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const WS_URL = 'ws://localhost:7861';
+        let websocket = null;
+        let videoStream = null;
+        let frameInterval = null;
+
+        // DOM Elements
+        const videoElement = document.getElementById('videoElement');
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const overlayCtx = overlayCanvas.getContext('2d');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const personsTableBody = document.querySelector('#personsTable tbody');
+        const modal = document.getElementById('editModal');
+
+        // --- WebSocket Logic ---
+        function connectWebSocket() {
+            if (websocket && websocket.readyState === WebSocket.OPEN) return;
+            websocket = new WebSocket(WS_URL);
+
+            websocket.onopen = () => {
+                connectionStatus.textContent = '✅ 已連接';
+                connectionStatus.className = 'status status-connected';
+                loadPersons(); // Auto-refresh on connect
+            };
+
+            websocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            };
+
+            websocket.onclose = () => {
+                connectionStatus.textContent = '❌ 未連接';
+                connectionStatus.className = 'status status-disconnected';
+                // 不要自動停止串流！讓攝像頭繼續運作
+                // stopStreaming();
+            };
+
+            websocket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+                connectionStatus.textContent = '❌ 連接錯誤';
+                connectionStatus.className = 'status status-disconnected';
+            };
+        }
+
+        function handleWebSocketMessage(data) {
+            switch (data.type) {
+                case 'recognition_result':
+                    updateRecognitionUI(data);
+                    break;
+                case 'stats':
+                    updateStatsUI(data.data);
+                    break;
+                case 'persons_list':
+                    renderPersonsTable(data.data);
+                    break;
+                case 'register_result':
+                case 'update_result':
+                case 'delete_result':
+                    showNotification(data.success ? `✅ ${data.message}` : `❌ ${data.message}`, data.success ? 'success' : 'error');
+                    if (data.success) loadPersons();
+                    if (data.type === 'update_result') closeModal();
+                    break;
+                case 'person_detected':
+                    handlePersonDetectedNotification(data);
+                    break;
+                case 'error':
+                    showNotification(`伺服器錯誤: ${data.message}`, 'error');
+                    break;
+            }
+        }
+        
+        function sendToServer(data) {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify(data));
+            } else {
+                showNotification('❌ 未連接到伺服器', 'error');
+            }
+        }
+
+        // --- UI Update Logic ---
+        function updateRecognitionUI(data) {
+            // 更新當前人臉資料
+            currentFaces = data.faces;
+            
+            // 更新覆蓋層
+            overlayCanvas.width = data.image_dimensions.width;
+            overlayCanvas.height = data.image_dimensions.height;
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            data.faces.forEach(face => {
+                const [x1, y1, x2, y2] = face.bbox;
+                overlayCtx.strokeStyle = face.person_id === 'unknown' ? 'red' : 'lime';
+                overlayCtx.lineWidth = 2;
+                overlayCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                if (face.person_id !== 'unknown') {
+                    overlayCtx.fillStyle = 'lime';
+                    overlayCtx.font = '16px Arial';
+                    overlayCtx.fillText(`${face.name} (${face.confidence.toFixed(2)})`, x1, y1 > 20 ? y1 - 5 : y1 + 20);
+                }
+            });
+
+            // 更新識別資訊
+            const info = `
+FPS: ${data.fps} | 處理時間: ${data.processing_time}ms
+檢測到 ${data.faces.length} 張人臉
+${data.faces.map(face => 
+    face.person_id !== 'unknown' ? `${face.name} (${face.role}) - 信心度: ${face.confidence.toFixed(3)}` : '未知人員'
+).join('\n')}
+時間: ${new Date(data.timestamp).toLocaleTimeString()}
+            `;
+            document.getElementById('recognitionInfo').textContent = info;
+            
+            // 更新即時統計
+            const statsHtml = `
+                <div><strong>即時識別結果</strong></div>
+                <div>FPS: ${data.fps}</div>
+                <div>處理時間: ${data.processing_time}ms</div>
+                <div>檢測人臉: ${data.faces.length}</div>
+                <div>已識別: ${data.faces.filter(f => f.person_id !== 'unknown').length}</div>
+                <div>未知: ${data.faces.filter(f => f.person_id === 'unknown').length}</div>
+                <hr>
+                ${data.faces.map(face => 
+                    `<div style="margin: 5px 0; padding: 5px; background: ${face.person_id === 'unknown' ? '#ffebee' : '#e8f5e8'}; border-radius: 3px;">
+                        ${face.person_id === 'unknown' ? '❓ 未知人員' : 
+                          `✅ ${face.name}<br><small>${face.role} | 信心度: ${face.confidence.toFixed(3)}</small>`}
+                    </div>`
+                ).join('')}
+            `;
+            document.getElementById('realtimeStats').innerHTML = statsHtml;
+        }
+
+        function updateStatsUI(stats) {
+            // 更新全域統計
+            updateGlobalStats(stats);
+            
+            const content = `
+                <p><strong>總處理幀數:</strong> ${stats.total_frames}</p>
+                <p><strong>檢測到人臉:</strong> ${stats.faces_detected}</p>
+                <p><strong>員工識別:</strong> ${stats.employees_detected}</p>
+                <p><strong>未知人員:</strong> ${stats.unknown_detected}</p>
+            `;
+            document.getElementById('stats-content').innerHTML = content;
+        }
+
+        // --- Camera and Streaming Logic ---
+        async function startCamera() {
+            try {
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                    video: true  // 移除尺寸限制，讓攝像頭使用原生解析度
+                });
+                videoElement.srcObject = videoStream;
+                
+                document.getElementById('startCamera').disabled = true;
+                document.getElementById('stopCamera').disabled = false;
+                
+                // 開始傳送影像幀
+                startStreaming();
+            } catch (error) {
+                alert('無法存取攝像頭: ' + error.message);
+            }
+        }
+        
+        function stopCamera() {
+            if (videoStream) {
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+                videoElement.srcObject = null;
+            }
+            
+            document.getElementById('startCamera').disabled = false;
+            document.getElementById('stopCamera').disabled = true;
+            
+            // 停止傳送
+            stopStreaming();
+        }
+        
+        function startStreaming() {
+            if (frameInterval) {
+                return;
+            }
+            
+            // 每秒傳送 5 幀
+            frameInterval = setInterval(() => {
+                if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+                    sendVideoFrame();
+                }
+            }, 200); // 200ms = 5 FPS
+        }
+        
+        function stopStreaming() {
+            if (frameInterval) {
+                clearInterval(frameInterval);
+                frameInterval = null;
+            }
+        }
+        
+        function sendVideoFrame() {
+            const canvas = document.createElement('canvas');
+            canvas.width = videoElement.videoWidth;
+            canvas.height = videoElement.videoHeight;
+            
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(videoElement, 0, 0);
+            
+            const imageData = canvas.toDataURL('image/jpeg', 0.7);
+            
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify({
+                    type: 'video_frame',
+                    image: imageData
+                }));
+            }
+        }
+
+        // --- Person Management Logic ---
+        function loadPersons() { sendToServer({ type: 'get_persons' }); }
+
+        function renderPersonsTable(persons) {
+            personsTableBody.innerHTML = '';
+            if (!persons || persons.length === 0) {
+                personsTableBody.innerHTML = '<tr><td colspan="5" style="text-align:center;">沒有資料</td></tr>';
+                return;
+            }
+            persons.forEach(p => {
+                const row = personsTableBody.insertRow();
+                row.innerHTML = `
+                    <td>${p.person_id}</td><td>${p.name}</td><td>${p.role}</td><td>${p.department || 'N/A'}</td>
+                    <td>
+                        <button class="btn-warning btn-sm" onclick="openEditModal('${p.person_id}', '${p.name}', '${p.role}', '${p.department || ''}')">修改</button>
+                        <button class="btn-danger btn-sm" onclick="deletePerson('${p.person_id}', '${p.name}')">刪除</button>
+                    </td>`;
+            });
+        }
+
+        function deletePerson(id, name) {
+            if (confirm(`確定要刪除「${name}」(${id}) 嗎？`)) {
+                sendToServer({ type: 'delete_person', person_id: id });
+            }
+        }
+
+        // --- Modal Logic ---
+        const personIdInput = document.getElementById('editPersonId');
+        const personNameInput = document.getElementById('editPersonName');
+        const personRoleInput = document.getElementById('editPersonRole');
+        const personDeptInput = document.getElementById('editPersonDept');
+
+        function openEditModal(id, name, role, dept) {
+            personIdInput.value = id;
+            personNameInput.value = name;
+            personRoleInput.value = role;
+            personDeptInput.value = dept;
+            modal.style.display = 'flex';
+        }
+
+        function closeModal() { modal.style.display = 'none'; }
+
+        function saveChanges() {
+            sendToServer({
+                type: 'update_person',
+                person_id: personIdInput.value,
+                name: personNameInput.value,
+                role: personRoleInput.value,
+                department: personDeptInput.value
+            });
+        }
+        
+        function captureForRegistration() {
+            const name = document.getElementById('personName').value.trim();
+            if (!name) { return showNotification('請輸入姓名', 'error'); }
+            const canvas = document.createElement('canvas');
+            canvas.width = videoElement.videoWidth;
+            canvas.height = videoElement.videoHeight;
+            canvas.getContext('2d').drawImage(videoElement, 0, 0);
+            const imageData = canvas.toDataURL('image/jpeg', 0.9);
+            sendToServer({
+                type: 'register_face',
+                name: name,
+                employee_id: document.getElementById('personEmployeeId').value.trim(),
+                role: document.getElementById('personRole').value,
+                department: document.getElementById('personDept').value.trim(),
+                image: imageData
+            });
+        }
+
+        // --- Person Detection Notification ---
+        function handlePersonDetectedNotification(data) {
+            const isFirstDetection = data.first_detection;
+            const notificationCount = data.notification_count;
+            
+            // 根據身分選擇顏色和圖示
+            let color, icon;
+            if (data.role === '員工') {
+                color = 'var(--success-color)';
+                icon = '👨‍💼';
+            } else if (data.role === '訪客') {
+                color = 'var(--warning-color)';
+                icon = '👤';
+            } else {
+                color = 'var(--info-color)';
+                icon = '🔍';
+            }
+            
+            // 建立通知訊息
+            let message;
+            if (isFirstDetection) {
+                message = `${icon} 檢測到 ${data.name} (${data.role})`;
+            } else {
+                message = `${icon} ${data.name} 仍在現場 (第${notificationCount}次通知)`;
+            }
+            
+            // 顯示通知
+            showPersonDetectedNotification(message, color, data);
+            
+            // Console 日誌（學習 sdk-demo 風格）
+            console.log(`👤 人員檢測通知: ${data.name} (${data.role})`);
+            console.log(`    部門: ${data.department || '未設定'}`);
+            console.log(`    信心度: ${data.confidence.toFixed(4)}`);
+            console.log(`    時間: ${data.timestamp}`);
+            console.log(`    ${isFirstDetection ? '首次檢測' : `第${notificationCount}次通知`}`);
+        }
+        
+        function showPersonDetectedNotification(message, color, data) {
+            const el = document.createElement('div');
+            el.innerHTML = `
+                <div style="font-weight: bold; margin-bottom: 5px;">${message}</div>
+                <div style="font-size: 0.9em; opacity: 0.9;">
+                    部門: ${data.department || '未設定'} | 信心度: ${data.confidence.toFixed(3)}
+                </div>
+                <div style="font-size: 0.8em; opacity: 0.8; margin-top: 3px;">
+                    ${data.timestamp}
+                </div>
+            `;
+            el.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 15px 20px;
+                border-radius: 8px;
+                color: white;
+                background-color: ${color};
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                z-index: 2000;
+                transition: all 0.5s ease;
+                max-width: 350px;
+                border-left: 4px solid rgba(255,255,255,0.5);
+            `;
+            
+            document.body.appendChild(el);
+            
+            // 動畫效果
+            setTimeout(() => {
+                el.style.transform = 'translateX(-10px)';
+            }, 100);
+            
+            // 自動消失
+            setTimeout(() => {
+                el.style.opacity = '0';
+                el.style.transform = 'translateX(100%)';
+                setTimeout(() => el.remove(), 500);
+            }, 5000); // 5秒後消失
+        }
+
+        // --- Utility ---
+        function showNotification(message, type) {
+            const el = document.createElement('div');
+            el.textContent = message;
+            el.style.cssText = `position:fixed;top:20px;right:20px;padding:15px 25px;border-radius:8px;color:white;background-color:${type === 'success' ? 'var(--success-color)' : 'var(--danger-color)'};box-shadow:0 4px 8px rgba(0,0,0,0.2);z-index:2000;transition:opacity 0.5s;`;
+            document.body.appendChild(el);
+            setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 500); }, 3000);
+        }
+
+        // 定期請求統計資料
+        function requestStats() {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify({ type: 'get_stats' }));
+            }
+        }
+
+        // 全域統計資料
+        let globalStats = { total_frames: 0, faces_detected: 0, employees_detected: 0, unknown_detected: 0 };
+        let currentFaces = [];
+
+        // 更新全域統計
+        function updateGlobalStats(stats) {
+            globalStats = stats;
+        }
+
+        // 管理員專用快捷鍵（學習 sdk-demo）
+        document.addEventListener('keydown', function(event) {
+            if (event.ctrlKey) {
+                switch(event.key) {
+                    case 'r':
+                        // Ctrl+R: 重新連接
+                        event.preventDefault();
+                        if (websocket) websocket.close();
+                        setTimeout(() => connectWebSocket(), 1000);
+                        console.log('🔄 重新連接中...');
+                        break;
+                    case 's':
+                        // Ctrl+S: 獲取統計資料
+                        event.preventDefault();
+                        console.log('📊 統計資料:', globalStats);
+                        break;
+                    case 'f':
+                        // Ctrl+F: 獲取當前人臉詳細資訊
+                        event.preventDefault();
+                        if (currentFaces.length > 0) {
+                            console.table(currentFaces.map(face => ({
+                                姓名: face.name || '未知',
+                                身分: face.role || '未知',
+                                部門: face.department || '未設定',
+                                信心度: face.confidence ? face.confidence.toFixed(4) : 'N/A',
+                                人臉ID: face.person_id
+                            })));
+                        } else {
+                            console.log('目前沒有檢測到人臉');
+                        }
+                        break;
+                }
+            }
+        });
+
+        // --- Event Listeners ---
+        document.getElementById('connectWS').addEventListener('click', connectWebSocket);
+        document.getElementById('startCamera').addEventListener('click', startCamera);
+        document.getElementById('stopCamera').addEventListener('click', stopCamera);
+        document.getElementById('captureRegister').addEventListener('click', captureForRegistration);
+        document.getElementById('refreshPersons').addEventListener('click', loadPersons);
+        document.getElementById('saveChanges').addEventListener('click', saveChanges);
+        document.getElementById('closeModal').addEventListener('click', closeModal);
+        window.addEventListener('load', connectWebSocket);
+        
+        // 定期更新統計
+        setInterval(requestStats, 5000); // 每 5 秒更新統計
+
+        // 管理員儀表板資訊（學習 sdk-demo）
+        console.log(`
+🔧 AuraFace 管理系統快捷鍵：
+- Ctrl+R：重新連接伺服器
+- Ctrl+S：查看統計資料
+- Ctrl+F：查看當前人臉詳細資訊
+
+📊 管理功能：
+- 人臉註冊：支援即時註冊
+- 即時統計：累計識別數據
+- 人員管理：完整 CRUD 操作
+- 詳細日誌：完整的操作記錄
+        `);
+
+        // 定期顯示系統狀態（僅開發時使用）
+        if (location.hostname === 'localhost') {
+            setInterval(() => {
+                const status = websocket ? (websocket.readyState === WebSocket.OPEN ? '已連接' : '未連接') : '未連接';
+                console.log(`[${new Date().toLocaleTimeString()}] 狀態: ${status}, 當前人臉: ${currentFaces.length}, 總處理幀數: ${globalStats.total_frames}`);
+            }, 30000); // 每30秒
+        }
+    </script>
+</body>
+</html>

@@ -13,11 +13,18 @@ import numpy as np
 from PIL import Image
 import io
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from database_manager import PostgresFaceDatabase
 from insightface.app import FaceAnalysis
 from huggingface_hub import snapshot_download
 import os
+
+# GPU 加速設定
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 使用第一張 GPU
+os.environ['OMP_NUM_THREADS'] = '1'        # 限制 OpenMP 線程減少 CPU 使用
+
+# 設定台灣時區
+TW_TZ = timezone(timedelta(hours=8))
 
 # 確保模型存在
 if not os.path.exists("models/auraface"):
@@ -26,12 +33,44 @@ if not os.path.exists("models/auraface"):
 
 # 初始化 AuraFace
 print("初始化 AuraFace...")
-face_app = FaceAnalysis(
-    name="auraface",
-    providers=["CPUExecutionProvider"],
-    root=".",
-)
-face_app.prepare(ctx_id=0, det_size=(640, 640))
+# 嘗試 GPU 加速，如果失敗則降級到 CPU
+try:
+    face_app = FaceAnalysis(
+        name="auraface",
+        providers=[
+            ("CUDAExecutionProvider", {
+                'device_id': 0,
+                'arena_extend_strategy': 'kSameAsRequested',
+                'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 2GB GPU 記憶體限制
+                'cudnn_conv_algo_search': 'EXHAUSTIVE',
+            }),
+            "CPUExecutionProvider"
+        ],
+        root=".",
+    )
+    face_app.prepare(ctx_id=0, det_size=(320, 320))  # 嘗試 GPU
+    print("✅ AuraFace GPU 加速已啟用，處理解析度: 320x320")
+except Exception as e:
+    print(f"⚠️ GPU 初始化失敗，降級到 CPU: {e}")
+    face_app = FaceAnalysis(
+        name="auraface",
+        providers=["CPUExecutionProvider"],
+        root=".",
+    )
+    face_app.prepare(ctx_id=-1, det_size=(256, 256))  # CPU 模式
+    print("✅ AuraFace CPU 模式已啟用，處理解析度: 256x256")
+
+# 驗證 GPU 使用
+try:
+    import onnxruntime as ort
+    available_providers = ort.get_available_providers()
+    print(f"🔍 可用提供者: {available_providers}")
+    if 'CUDAExecutionProvider' in available_providers:
+        print("✅ CUDA 加速已啟用")
+    else:
+        print("❌ CUDA 加速未啟用，請檢查 GPU 設定")
+except ImportError:
+    print("⚠️ onnxruntime 模組不可用")
 
 # 初始化資料庫
 face_db = PostgresFaceDatabase()
@@ -46,37 +85,71 @@ class RealtimeFaceRecognition:
             'visitors_detected': 0,
             'unknown_detected': 0
         }
+        # 智能採樣控制（CPU 優化）
+        self.client_frame_counters = {}  # 每個客戶端的幀計數器
+        self.skip_frames = 4  # 跳過幀數：每5幀處理1幀（降低 CPU 負載）
+        
+        # 資料庫寫入控制（避免重複寫入）
+        self.recent_recognitions = {}  # {person_id: last_recognition_time}
+        self.recognition_cooldown = 30  # 同一人30秒內不重複寫入資料庫
+        
+        # 智能通知機制
+        self.person_detection_history = {}  # {person_id: [detection_times]}
+        self.person_notification_times = {}  # {person_id: [notification_times]}
+        self.stable_detection_count = 3      # 需要連續3次穩定識別
+        self.first_notification_interval = 60   # 首次通知後1分鐘
+        self.regular_notification_interval = 300  # 之後每5分鐘
     
     async def register(self, websocket, path):
         """註冊新的 WebSocket 連接"""
         self.connected_clients.add(websocket)
-        print(f"新客戶端連接: {websocket.remote_address}")
+        print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 新客戶端連接: {websocket.remote_address}")
         
         try:
             await websocket.send(json.dumps({
                 'type': 'connection_status',
                 'status': 'connected',
-                'message': '已連接到即時人臉識別系統'
+                'message': '已連接到即時人臉識別系統',
+                'timestamp': datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
             }))
             
             await self.handle_client(websocket)
-        except websockets.exceptions.ConnectionClosed:
-            pass
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 客戶端正常斷線: {websocket.remote_address}")
+        except Exception as e:
+            print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 客戶端異常斷線: {websocket.remote_address}, 錯誤: {e}")
         finally:
-            self.connected_clients.remove(websocket)
-            print(f"客戶端斷線: {websocket.remote_address}")
+            if websocket in self.connected_clients:
+                self.connected_clients.remove(websocket)
+            # 清理該客戶端的幀計數器
+            client_id = id(websocket)
+            if client_id in self.client_frame_counters:
+                del self.client_frame_counters[client_id]
+            print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 客戶端清理完成: {websocket.remote_address}")
     
     async def handle_client(self, websocket):
         """處理客戶端訊息"""
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-                await self.process_message(websocket, data)
-            except Exception as e:
-                await websocket.send(json.dumps({
-                    'type': 'error',
-                    'message': f'訊息處理錯誤: {str(e)}'
-                }))
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    await self.process_message(websocket, data)
+                except json.JSONDecodeError as e:
+                    print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] JSON 解析錯誤: {e}")
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': f'JSON 格式錯誤: {str(e)}'
+                    }))
+                except Exception as e:
+                    print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 訊息處理錯誤: {e}")
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': f'訊息處理錯誤: {str(e)}'
+                    }))
+        except websockets.exceptions.ConnectionClosed:
+            print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 客戶端連接已關閉")
+        except Exception as e:
+            print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] handle_client 錯誤: {e}")
     
     async def process_message(self, websocket, data):
         """處理不同類型的訊息"""
@@ -88,15 +161,87 @@ class RealtimeFaceRecognition:
             await self.send_stats(websocket)
         elif message_type == 'register_face':
             await self.register_new_face(websocket, data)
+        elif message_type == 'get_persons':
+            await self.get_all_persons(websocket)
+        elif message_type == 'update_person':
+            await self.update_person(websocket, data)
+        elif message_type == 'delete_person':
+            await self.delete_person(websocket, data)
         else:
             await websocket.send(json.dumps({
                 'type': 'error',
                 'message': f'未知訊息類型: {message_type}'
             }))
+
+    async def get_all_persons(self, websocket):
+        """取得所有已註冊人員列表並發送給客戶端"""
+        try:
+            all_faces = face_db.get_all_faces()
+            person_list = [{"person_id": pid, **pinfo} for pid, pinfo in all_faces.items()]
+            await websocket.send(json.dumps({
+                'type': 'persons_list',
+                'success': True,
+                'data': person_list
+            }))
+        except Exception as e:
+            await websocket.send(json.dumps({
+                'type': 'error',
+                'message': f'獲取人員列表失敗: {str(e)}'
+            }))
+
+    async def update_person(self, websocket, data):
+        """更新人員資料"""
+        try:
+            person_id = data.get('person_id')
+            name = data.get('name')
+            role = data.get('role')
+            department = data.get('department')
+            
+            if not all([person_id, name, role, department is not None]):
+                await websocket.send(json.dumps({'type': 'update_result', 'success': False, 'message': '缺少必要資料'}))
+                return
+
+            success, message = face_db.update_face(person_id, name, role, department)
+            await websocket.send(json.dumps({
+                'type': 'update_result',
+                'success': success,
+                'message': message
+            }))
+        except Exception as e:
+            await websocket.send(json.dumps({'type': 'update_result', 'success': False, 'message': f'更新失敗: {str(e)}'}))
+
+    async def delete_person(self, websocket, data):
+        """刪除人員資料"""
+        try:
+            person_id = data.get('person_id')
+            if not person_id:
+                await websocket.send(json.dumps({'type': 'delete_result', 'success': False, 'message': '缺少 person_id'}))
+                return
+
+            success, message = face_db.delete_face(person_id)
+            await websocket.send(json.dumps({
+                'type': 'delete_result',
+                'success': success,
+                'message': message
+            }))
+        except Exception as e:
+            await websocket.send(json.dumps({'type': 'delete_result', 'success': False, 'message': f'刪除失敗: {str(e)}'}))
     
     async def process_video_frame(self, websocket, data):
         """處理視訊幀並進行人臉識別"""
         try:
+            # 智能採樣：跳過幀以減少GPU負載
+            client_id = id(websocket)
+            if client_id not in self.client_frame_counters:
+                self.client_frame_counters[client_id] = 0
+            
+            self.client_frame_counters[client_id] += 1
+            
+            # 每4幀處理1幀，跳過其他幀
+            if self.client_frame_counters[client_id] % (self.skip_frames + 1) != 0:
+                # 跳過此幀，不進行處理
+                return
+            
             # 解析 base64 圖片
             image_data = data.get('image')
             if not image_data:
@@ -106,12 +251,10 @@ class RealtimeFaceRecognition:
             if ',' in image_data:
                 image_data = image_data.split(',')[1]
             
-            # 解碼圖片
+            # 直接解碼為 numpy array，完全跳過 PIL 轉換
             image_bytes = base64.b64decode(image_data)
-            image = Image.open(io.BytesIO(image_bytes))
-            
-            # 轉換為 CV2 格式
-            cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            cv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             # 進行人臉識別
             start_time = time.time()
@@ -130,21 +273,18 @@ class RealtimeFaceRecognition:
                     else:
                         self.recognition_stats['visitors_detected'] += 1
             
-            # 在圖片上繪製結果
-            annotated_image = self.draw_annotations(cv_image, results)
-            
-            # 轉換回 base64
-            _, buffer = cv2.imencode('.jpg', annotated_image)
-            annotated_b64 = base64.b64encode(buffer).decode('utf-8')
-            
-            # 發送結果
+            # 發送結果（不包含處理後的圖片，讓前端自己繪製）
             response = {
                 'type': 'recognition_result',
-                'image': f'data:image/jpeg;base64,{annotated_b64}',
                 'faces': results,
                 'processing_time': round(processing_time * 1000, 2),  # ms
                 'fps': round(1 / processing_time, 1) if processing_time > 0 else 0,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                'image_dimensions': {
+                    'width': cv_image.shape[1],
+                    'height': cv_image.shape[0]
+                },
+                'client_timestamp': data.get('client_timestamp')  # 回傳客戶端時間戳用於延遲計算
             }
             
             await websocket.send(json.dumps(response))
@@ -158,30 +298,65 @@ class RealtimeFaceRecognition:
     async def identify_faces_async(self, cv_image):
         """非同步人臉識別"""
         try:
-            # 執行人臉檢測
+            # 極大幅降低處理解析度，從480降到256，最大化GPU利用率
+            height, width = cv_image.shape[:2]
+            if width > 256:
+                scale = 256 / width
+                new_width = 256
+                new_height = int(height * scale)
+                # 使用最快的插值演算法減少 CPU 負載
+                cv_image = cv2.resize(cv_image, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
+                scale_factor = 1 / scale
+            else:
+                scale_factor = 1.0
+            
+            # 執行人臉檢測（GPU加速）
             faces = face_app.get(cv_image)
             
             if not faces:
                 return []
             
             results = []
+            current_time = time.time()
+            
             for face in faces:
-                # 在資料庫中搜尋相似人臉
-                matches = face_db.find_similar_faces(face.normed_embedding, threshold=0.6)
+                # 調整座標回原始尺寸
+                if scale_factor != 1.0:
+                    face.bbox = face.bbox * scale_factor
+                
+                # 在資料庫中搜尋相似人臉，使用平衡的閾值
+                matches = face_db.find_similar_faces(face.normed_embedding, threshold=0.4)
                 
                 if matches:
                     best_match = matches[0]
-                    # 記錄識別日誌
-                    face_db.log_recognition(
-                        best_match['person_id'], 
-                        best_match['name'], 
-                        best_match['confidence'], 
-                        "websocket_stream"
-                    )
+                    person_id = best_match['person_id']
+                    
+                    # 智能通知機制：穩定識別確認
+                    await self.handle_person_detection(person_id, best_match, current_time)
+                    
+                    # 智能寫入：同一人在cooldown時間內不重複寫入資料庫
+                    should_log = False
+                    if person_id not in self.recent_recognitions:
+                        should_log = True
+                    else:
+                        last_time = self.recent_recognitions[person_id]
+                        if current_time - last_time > self.recognition_cooldown:
+                            should_log = True
+                    
+                    # 只在高信心度且未重複時寫入資料庫
+                    if should_log and best_match['confidence'] > 0.65:
+                        face_db.log_recognition(
+                            person_id, 
+                            best_match['name'], 
+                            best_match['confidence'], 
+                            "websocket_stream"
+                        )
+                        self.recent_recognitions[person_id] = current_time
+                        print(f"📝 記錄識別: {best_match['name']} (信心度: {best_match['confidence']:.3f})")
                     
                     results.append({
                         'bbox': face.bbox.tolist(),
-                        'person_id': best_match['person_id'],
+                        'person_id': person_id,
                         'name': best_match['name'],
                         'role': best_match['role'],
                         'department': best_match['department'],
@@ -264,12 +439,100 @@ class RealtimeFaceRecognition:
         }
         await websocket.send(json.dumps(response))
     
+    async def handle_person_detection(self, person_id, best_match, current_time):
+        """處理人員檢測的智能通知機制"""
+        try:
+            # 記錄檢測歷史
+            if person_id not in self.person_detection_history:
+                self.person_detection_history[person_id] = []
+            
+            self.person_detection_history[person_id].append(current_time)
+            
+            # 只保留最近的檢測記錄（避免記憶體洩漏）
+            if len(self.person_detection_history[person_id]) > 10:
+                self.person_detection_history[person_id] = self.person_detection_history[person_id][-10:]
+            
+            # 檢查是否達到穩定識別次數
+            recent_detections = [t for t in self.person_detection_history[person_id] if current_time - t <= 10]  # 10秒內的檢測
+            
+            if len(recent_detections) >= self.stable_detection_count:
+                # 檢查是否需要發送通知
+                should_notify = False
+                
+                if person_id not in self.person_notification_times:
+                    # 首次檢測到此人
+                    should_notify = True
+                    self.person_notification_times[person_id] = []
+                else:
+                    # 檢查距離上次通知的時間
+                    last_notifications = self.person_notification_times[person_id]
+                    if not last_notifications:
+                        # 沒有通知記錄，發送首次通知
+                        should_notify = True
+                    else:
+                        last_notification_time = last_notifications[-1]
+                        time_since_last = current_time - last_notification_time
+                        
+                        # 根據通知次數決定間隔
+                        if len(last_notifications) == 1:
+                            # 第二次通知：首次通知後1分鐘
+                            if time_since_last >= self.first_notification_interval:
+                                should_notify = True
+                        else:
+                            # 後續通知：每5分鐘
+                            if time_since_last >= self.regular_notification_interval:
+                                should_notify = True
+                
+                # 發送通知
+                if should_notify:
+                    await self.send_person_detected_notification(person_id, best_match, current_time)
+                    self.person_notification_times[person_id].append(current_time)
+                    
+                    # 只保留最近的通知記錄
+                    if len(self.person_notification_times[person_id]) > 5:
+                        self.person_notification_times[person_id] = self.person_notification_times[person_id][-5:]
+        
+        except Exception as e:
+            print(f"處理人員檢測通知時發生錯誤: {e}")
+    
+    async def send_person_detected_notification(self, person_id, person_info, current_time):
+        """發送人員檢測通知給所有連接的客戶端"""
+        try:
+            notification_count = len(self.person_notification_times.get(person_id, []))
+            is_first_detection = notification_count == 0
+            
+            notification = {
+                'type': 'person_detected',
+                'person_id': person_id,
+                'name': person_info['name'],
+                'role': person_info['role'],
+                'department': person_info['department'],
+                'confidence': person_info['confidence'],
+                'timestamp': datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                'first_detection': is_first_detection,
+                'notification_count': notification_count + 1
+            }
+            
+            # 發送給所有連接的客戶端
+            if self.connected_clients:
+                message = json.dumps(notification)
+                await asyncio.gather(
+                    *[client.send(message) for client in self.connected_clients],
+                    return_exceptions=True
+                )
+                
+                print(f"📢 發送人員檢測通知: {person_info['name']} ({'首次' if is_first_detection else f'第{notification_count + 1}次'})")
+        
+        except Exception as e:
+            print(f"發送人員檢測通知時發生錯誤: {e}")
+
     async def register_new_face(self, websocket, data):
         """註冊新人臉"""
         try:
             name = data.get('name')
             role = data.get('role')
             department = data.get('department', '')
+            employee_id = data.get('employee_id', '')
             image_data = data.get('image')
             
             if not all([name, role, image_data]):
@@ -299,17 +562,22 @@ class RealtimeFaceRecognition:
                 }))
                 return
             
+            # 如果檢測到多張人臉，自動選擇最大的（通常是主要目標）
             if len(faces) > 1:
+                print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 檢測到 {len(faces)} 張人臉，自動選擇最大的")
+                # 按人臉大小排序，選擇最大的
+                faces = sorted(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]), reverse=True)
+                
                 await websocket.send(json.dumps({
-                    'type': 'register_result',
-                    'success': False,
-                    'message': '檢測到多張人臉'
+                    'type': 'register_info',
+                    'message': f'檢測到 {len(faces)} 張人臉，已自動選擇最大的進行註冊'
                 }))
-                return
             
-            # 註冊人臉
+            # 註冊最大的人臉
             embedding = faces[0].normed_embedding
-            success, message = face_db.register_face(name, role, department, embedding)
+            face_area = (faces[0].bbox[2] - faces[0].bbox[0]) * (faces[0].bbox[3] - faces[0].bbox[1])
+            print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 註冊人臉大小: {face_area:.0f} 像素")
+            success, message = face_db.register_face(name, role, department, embedding, employee_id)
             
             await websocket.send(json.dumps({
                 'type': 'register_result',
@@ -329,7 +597,7 @@ async def main():
     recognizer = RealtimeFaceRecognition()
     
     # 從環境變數讀取端口
-    ws_port = int(os.getenv('WEBSOCKET_PORT', 8765))
+    ws_port = int(os.getenv('WEBSOCKET_PORT', 7861))
     
     print("🚀 啟動 WebSocket 即時人臉識別伺服器...")
     print(f"📡 WebSocket 伺服器位址: ws://localhost:{ws_port}")
@@ -339,8 +607,9 @@ async def main():
         "0.0.0.0", 
         ws_port,
         max_size=10 * 1024 * 1024,  # 10MB 消息大小限制
-        ping_interval=20,
-        ping_timeout=10
+        ping_interval=None,         # 關閉自動心跳，改由客戶端處理
+        ping_timeout=None,          # 關閉心跳超時
+        close_timeout=10            # 10秒關閉超時
     )
     
     await start_server

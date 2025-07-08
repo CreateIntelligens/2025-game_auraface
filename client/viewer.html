@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraFace 人臉識別檢視器</title>
+</head>
+<body>
+    <div id="auraface-container"></div>
+
+    <script src="sdk/auraface-viewer.js"></script>
+    <script>
+        // 第三方使用範例
+        const viewer = new AuraFaceViewer({
+            container: '#auraface-container',
+            wsUrl: 'ws://localhost:7861',
+            autoConnect: true,
+            showStats: true,
+            frameRate: 5,
+            
+            // 回調函數
+            onConnected: function(event) {
+                console.log('✅ 已連接到 AuraFace 伺服器');
+            },
+            
+            onDisconnected: function(event) {
+                console.log('❌ 與 AuraFace 伺服器斷線:', event.code);
+            },
+            
+            onFaceDetected: function(data) {
+                console.log('👤 檢測到人臉:', data.faces.length);
+                
+                // 自定義處理邏輯
+                data.faces.forEach(face => {
+                    if (face.person_id !== 'unknown') {
+                        console.log(`識別到: ${face.name} (${face.role}), 信心度: ${face.confidence}`);
+                    } else {
+                        console.log('發現未知人員');
+                    }
+                });
+            },
+            
+            onError: function(error) {
+                console.error('❌ AuraFace 錯誤:', error);
+            }
+        });
+
+        // 示範如何使用 API
+        document.addEventListener('keydown', function(event) {
+            switch(event.key) {
+                case 'c':
+                    // 手動連接
+                    viewer.connect();
+                    break;
+                case 'd':
+                    // 手動斷線
+                    viewer.disconnect();
+                    break;
+                case 's':
+                    // 獲取連接狀態
+                    console.log('連接狀態:', viewer.getConnectionStatus());
+                    break;
+                case 'f':
+                    // 獲取當前人臉
+                    console.log('當前人臉:', viewer.getCurrentFaces());
+                    break;
+            }
+        });
+
+        // 顯示使用說明
+        console.log(`
+🔧 AuraFace Viewer 使用說明：
+- 按 C 鍵：手動連接
+- 按 D 鍵：手動斷線  
+- 按 S 鍵：檢查連接狀態
+- 按 F 鍵：獲取當前人臉資料
+        `);
+    </script>
+</body>
+</html>

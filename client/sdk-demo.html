@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraFace 管理系統 (SDK版本)</title>
+</head>
+<body>
+    <div id="auraface-admin-container"></div>
+
+    <script src="sdk/auraface-admin.js"></script>
+    <script>
+        // 管理員使用範例
+        const admin = new AuraFaceAdmin({
+            container: '#auraface-admin-container',
+            wsUrl: 'ws://localhost:7861',
+            autoConnect: true,
+            enableRegistration: true,
+            enableStats: true,
+            frameRate: 5,
+            
+            // 回調函數
+            onConnected: function(event) {
+                console.log('✅ 管理員已連接到 AuraFace 伺服器');
+            },
+            
+            onDisconnected: function(event) {
+                console.log('❌ 管理員與 AuraFace 伺服器斷線:', event.code);
+                
+                // 可以添加管理員專用的斷線處理邏輯
+                if (event.code === 1011) {
+                    console.log('⚠️ 心跳超時，嘗試重連...');
+                }
+            },
+            
+            onFaceDetected: function(data) {
+                console.log('👤 管理員檢測到人臉:', data.faces.length);
+                
+                // 管理員可以看到更詳細的資訊
+                data.faces.forEach((face, index) => {
+                    if (face.person_id !== 'unknown') {
+                        console.log(`[${index + 1}] ${face.name} (${face.role})`);
+                        console.log(`    部門: ${face.department || '未設定'}`);
+                        console.log(`    信心度: ${face.confidence.toFixed(4)}`);
+                        console.log(`    邊界框: [${face.bbox.map(x => x.toFixed(1)).join(', ')}]`);
+                    } else {
+                        console.log(`[${index + 1}] 未知人員 - 需要註冊`);
+                    }
+                });
+            },
+            
+            onRegistrationComplete: function(data) {
+                if (data.success) {
+                    console.log('✅ 註冊成功:', data.message);
+                    
+                    // 自動更新統計
+                    setTimeout(() => {
+                        admin.requestStats();
+                    }, 1000);
+                } else {
+                    console.log('❌ 註冊失敗:', data.message);
+                }
+            },
+            
+            onError: function(error) {
+                console.error('❌ AuraFace 管理系統錯誤:', error);
+                
+                // 管理員專用錯誤處理
+                if (error.message.includes('WebSocket')) {
+                    console.log('🔧 建議檢查伺服器連接狀態');
+                } else if (error.message.includes('camera')) {
+                    console.log('📷 建議檢查攝像頭權限');
+                }
+            }
+        });
+
+        // 管理員專用快捷鍵
+        document.addEventListener('keydown', function(event) {
+            if (event.ctrlKey) {
+                switch(event.key) {
+                    case 'r':
+                        // Ctrl+R: 重新連接
+                        event.preventDefault();
+                        admin.disconnect();
+                        setTimeout(() => admin.connect(), 1000);
+                        console.log('🔄 重新連接中...');
+                        break;
+                    case 's':
+                        // Ctrl+S: 獲取統計資料
+                        event.preventDefault();
+                        console.log('📊 統計資料:', admin.getGlobalStats());
+                        break;
+                    case 'f':
+                        // Ctrl+F: 獲取當前人臉詳細資訊
+                        event.preventDefault();
+                        const faces = admin.getCurrentFaces();
+                        console.table(faces.map(face => ({
+                            姓名: face.name || '未知',
+                            身分: face.role || '未知',
+                            部門: face.department || '未設定',
+                            信心度: face.confidence ? face.confidence.toFixed(4) : 'N/A',
+                            人臉ID: face.person_id
+                        })));
+                        break;
+                }
+            }
+        });
+
+        // 管理員儀表板資訊
+        console.log(`
+🔧 AuraFace 管理系統快捷鍵：
+- Ctrl+R：重新連接伺服器
+- Ctrl+S：查看統計資料
+- Ctrl+F：查看當前人臉詳細資訊
+
+📊 管理功能：
+- 人臉註冊：支援多人場景自動選擇
+- 即時統計：累計識別數據
+- 連接監控：自動重連機制
+- 詳細日誌：完整的操作記錄
+        `);
+
+        // 定期顯示系統狀態（僅開發時使用）
+        if (location.hostname === 'localhost') {
+            setInterval(() => {
+                const status = admin.getConnectionStatus();
+                const faces = admin.getCurrentFaces();
+                const stats = admin.getGlobalStats();
+                
+                console.log(`[${new Date().toLocaleTimeString()}] 狀態: ${
+                    status === WebSocket.OPEN ? '已連接' : '未連接'
+                }, 當前人臉: ${faces.length}, 總處理幀數: ${stats.total_frames}`);
+            }, 30000); // 每30秒
+        }
+    </script>
+</body>
+</html>
