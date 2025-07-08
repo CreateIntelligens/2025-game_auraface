@@ -35,7 +35,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY database_manager.py .
 COPY websocket_realtime.py .
-COPY realtime_client.html .
+COPY init.sql .
+
+# Copy client directory
+COPY client/ ./client/
 
 # Create necessary directories
 RUN mkdir -p examples/xiangxiang_man database logs models
@@ -43,5 +46,5 @@ RUN mkdir -p examples/xiangxiang_man database logs models
 # Expose ports
 EXPOSE 7860 7861
 
-# Run the main application
+# Default command (will be overridden by docker-compose)
 CMD ["python", "app.py"]
