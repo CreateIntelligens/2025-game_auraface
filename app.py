@@ -26,23 +26,79 @@ from pathlib import Path
 os.makedirs("database", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
-# 下載 AuraFace 模型
-if not os.path.exists("models/auraface"):
-    print("正在下載 AuraFace 模型...")
-    snapshot_download(
-        "fal/AuraFace-v1",
-        local_dir="models/auraface",
-    )
+# --- 模型檢查與下載 ---
+model_dir = "models/auraface"
+# 檢查核心模型文件 (根據 HuggingFace 實際文件列表)
+required_models = ["glintr100.onnx", "scrfd_10g_bnkps.onnx", "genderage.onnx", "1k3d68.onnx", "2d106det.onnx"]
 
-# 初始化 AuraFace
+def check_models_complete():
+    if not os.path.exists(model_dir):
+        return False
+    
+    missing_models = []
+    for model in required_models:
+        model_path = os.path.join(model_dir, model)
+        if not os.path.exists(model_path):
+            missing_models.append(model)
+        elif os.path.getsize(model_path) < 1024:  # 檢查文件大小 > 1KB
+            missing_models.append(f"{model} (檔案損壞)")
+    
+    if missing_models:
+        print(f"❌ 缺少或損壞的模型: {missing_models}")
+        return False
+    return True
+
+if not check_models_complete():
+    print(f"⚠️ 模型不完整，清理並重新下載...")
+    # 清理舊的模型目錄
+    if os.path.exists(model_dir):
+        import shutil
+        shutil.rmtree(model_dir)
+    
+    os.makedirs(model_dir, exist_ok=True)
+    
+    try:
+        print("📥 開始下載 AuraFace 模型...")
+        snapshot_download("fal/AuraFace-v1", local_dir=model_dir, local_dir_use_symlinks=False)
+        print("✅ AuraFace 模型下載完成。")
+        
+        # 再次檢查
+        if not check_models_complete():
+            print("❌ 下載後仍有模型缺失")
+            exit(1)
+            
+    except Exception as e:
+        print(f"❌ 模型下載失敗: {e}")
+        print("請檢查網路連線或 Hugging Face 連接")
+        exit(1)
+else:
+    print("✅ AuraFace 模型已存在且完整。")
+
+# --- 初始化 AuraFace ---
 print("正在初始化 AuraFace...")
-app = FaceAnalysis(
-    name="auraface",
-    providers=["CUDAExecutionProvider", "CPUExecutionProvider"],  # GPU優先
-    root=".",
-)
-app.prepare(ctx_id=0, det_size=(320, 320))  # 降低解析度提升性能
-print("✅ AuraFace GPU加速初始化完成！")
+try:
+    # 讓 insightface 自動從模型目錄載入模型
+    app = FaceAnalysis(
+        name="auraface",
+        root=".", # root="." 會讓它尋找 ./models/auraface
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+    )
+    app.prepare(ctx_id=0, det_size=(320, 320))
+    print("✅ AuraFace (GPU) 初始化完成！")
+except Exception as e:
+    print(f"⚠️ GPU 初始化失敗，嘗試降級到 CPU: {e}")
+    try:
+        app = FaceAnalysis(
+            name="auraface",
+            root=".",
+            providers=["CPUExecutionProvider"]
+        )
+        app.prepare(ctx_id=-1, det_size=(320, 320))
+        print("✅ AuraFace (CPU) 初始化完成！")
+    except Exception as cpu_e:
+        print(f"❌ CPU 初始化也失敗了: {cpu_e}")
+        print("請檢查模型檔案是否正確，以及 ONNX runtime 是否安裝成功。")
+        exit(1)
 
 # 匯入資料庫管理器
 try:

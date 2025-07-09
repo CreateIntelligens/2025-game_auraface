@@ -1,3 +1,18 @@
+-- 確保資料庫存在並連接
+-- 注意：POSTGRES_DB 環境變數會自動創建資料庫，這裡只是確保
+
+-- 確保用戶存在 (如果不存在則創建)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'ai360') THEN
+        CREATE USER ai360 WITH PASSWORD 'ai360';
+    END IF;
+END
+$$;
+
+-- 給予用戶權限
+GRANT ALL PRIVILEGES ON DATABASE auraface TO ai360;
+
 -- 創建 pgvector 擴展
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -40,3 +55,12 @@ $$ language 'plpgsql';
 CREATE TRIGGER update_face_profiles_updated_at 
 BEFORE UPDATE ON face_profiles 
 FOR EACH ROW EXECUTE PROCEDURE update_updated_at_column();
+
+-- 確保 ai360 用戶可以訪問所有表
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ai360;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ai360;
+GRANT USAGE ON SCHEMA public TO ai360;
+
+-- 設定未來創建的表也給予權限
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ai360;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ai360;

@@ -149,7 +149,7 @@
     </div>
 
     <script>
-        const WS_URL = 'ws://localhost:7861';
+        const WS_URL = `wss://${window.location.hostname}/ws`;
         let websocket = null;
         let videoStream = null;
         let frameInterval = null;

@@ -7,7 +7,7 @@
 class AuraFaceViewer {
     constructor(config = {}) {
         this.config = {
-            wsUrl: config.wsUrl || 'ws://localhost:7861',
+            wsUrl: config.wsUrl || `wss://${window.location.hostname}:443/7861`,
             container: config.container || document.body,
             autoConnect: config.autoConnect !== false,
             showStats: config.showStats !== false,

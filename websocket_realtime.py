@@ -26,39 +26,58 @@ os.environ['OMP_NUM_THREADS'] = '1'        # 限制 OpenMP 線程減少 CPU 使�
 # 設定台灣時區
 TW_TZ = timezone(timedelta(hours=8))
 
-# 確保模型存在
-if not os.path.exists("models/auraface"):
-    print("正在下載 AuraFace 模型...")
-    snapshot_download("fal/AuraFace-v1", local_dir="models/auraface")
+# --- 等待 app.py 下載模型 ---
+model_dir = "models/auraface"
+required_models = ["glintr100.onnx", "scrfd_10g_bnkps.onnx", "genderage.onnx", "1k3d68.onnx", "2d106det.onnx"]
 
-# 初始化 AuraFace
-print("初始化 AuraFace...")
-# 嘗試 GPU 加速，如果失敗則降級到 CPU
+print("⏳ 等待模型準備...")
+import time
+while True:
+    if os.path.exists(model_dir):
+        missing = [m for m in required_models if not os.path.exists(os.path.join(model_dir, m))]
+        if not missing:
+            print("✅ 模型準備完成")
+            break
+        else:
+            print(f"⏳ 仍在等待模型: {missing[:3]}...")
+    else:
+        print("⏳ 等待模型目錄創建...")
+    
+    time.sleep(5)
+
+# --- 初始化 AuraFace ---
+print("正在初始化 AuraFace...")
 try:
+    # 讓 insightface 自動從模型目錄載入模型
     face_app = FaceAnalysis(
         name="auraface",
+        root=".", # root="." 會讓它尋找 ./models/auraface
         providers=[
             ("CUDAExecutionProvider", {
                 'device_id': 0,
                 'arena_extend_strategy': 'kSameAsRequested',
-                'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 2GB GPU 記憶體限制
+                'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 2GB
                 'cudnn_conv_algo_search': 'EXHAUSTIVE',
             }),
             "CPUExecutionProvider"
-        ],
-        root=".",
+        ]
     )
-    face_app.prepare(ctx_id=0, det_size=(320, 320))  # 嘗試 GPU
-    print("✅ AuraFace GPU 加速已啟用，處理解析度: 320x320")
+    face_app.prepare(ctx_id=0, det_size=(320, 320))
+    print("✅ AuraFace (GPU) 初始化完成！")
 except Exception as e:
-    print(f"⚠️ GPU 初始化失敗，降級到 CPU: {e}")
-    face_app = FaceAnalysis(
-        name="auraface",
-        providers=["CPUExecutionProvider"],
-        root=".",
-    )
-    face_app.prepare(ctx_id=-1, det_size=(256, 256))  # CPU 模式
-    print("✅ AuraFace CPU 模式已啟用，處理解析度: 256x256")
+    print(f"⚠️ GPU 初始化失敗，嘗試降級到 CPU: {e}")
+    try:
+        face_app = FaceAnalysis(
+            name="auraface",
+            root=".",
+            providers=["CPUExecutionProvider"]
+        )
+        face_app.prepare(ctx_id=-1, det_size=(320, 320))
+        print("✅ AuraFace (CPU) 初始化完成！")
+    except Exception as cpu_e:
+        print(f"❌ CPU 初始化也失敗了: {cpu_e}")
+        print("請檢查模型檔案是否正確，以及 ONNX runtime 是否安裝成功。")
+        exit(1)
 
 # 驗證 GPU 使用
 try:
