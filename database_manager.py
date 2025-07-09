@@ -72,7 +72,19 @@ class PostgresFaceDatabase:
     def register_face(self, name, role, department, embedding, employee_id=None):
         """註冊新人臉"""
         try:
-            person_id = f"{role}_{len(self.get_all_faces()):04d}"
+            # 生成唯一的 person_id，使用UUID確保絕對唯一性
+            import uuid
+            unique_suffix = str(uuid.uuid4())[:8]  # 取UUID前8位
+            existing_faces = self.get_all_faces()
+            counter = 1
+            
+            # 確保 ID 唯一性
+            while True:
+                person_id = f"{role}_{counter:04d}_{unique_suffix}"
+                if person_id not in existing_faces:
+                    break
+                counter += 1
+                unique_suffix = str(uuid.uuid4())[:8]  # 重新生成UUID
             
             if hasattr(self, 'use_postgres') and not self.use_postgres:
                 # JSON 模式
@@ -195,13 +207,14 @@ class PostgresFaceDatabase:
             'visitors': visitors
         }
 
-    def update_face(self, person_id, name, role, department):
+    def update_face(self, person_id, name, employee_id, role, department):
         """更新現有人臉資料"""
         try:
             if hasattr(self, 'use_postgres') and not self.use_postgres:
                 # JSON 模式
                 if person_id in self.faces:
                     self.faces[person_id]['name'] = name
+                    self.faces[person_id]['employee_id'] = employee_id
                     self.faces[person_id]['role'] = role
                     self.faces[person_id]['department'] = department
                     self.save_json_database()
@@ -212,9 +225,9 @@ class PostgresFaceDatabase:
             with self.conn.cursor() as cursor:
                 cursor.execute("""
                     UPDATE face_profiles
-                    SET name = %s, role = %s, department = %s
+                    SET name = %s, employee_id = %s, role = %s, department = %s
                     WHERE person_id = %s
-                """, (name, role, department, person_id))
+                """, (name, employee_id, role, department, person_id))
                 self.conn.commit()
                 if cursor.rowcount == 0:
                     return False, f"找不到 ID 為 {person_id} 的人員"

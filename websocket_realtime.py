@@ -194,6 +194,7 @@ class RealtimeFaceRecognition:
         try:
             person_id = data.get('person_id')
             name = data.get('name')
+            employee_id = data.get('employee_id')
             role = data.get('role')
             department = data.get('department')
             
@@ -201,7 +202,7 @@ class RealtimeFaceRecognition:
                 await websocket.send(json.dumps({'type': 'update_result', 'success': False, 'message': '缺少必要資料'}))
                 return
 
-            success, message = face_db.update_face(person_id, name, role, department)
+            success, message = face_db.update_face(person_id, name, employee_id, role, department)
             await websocket.send(json.dumps({
                 'type': 'update_result',
                 'success': success,

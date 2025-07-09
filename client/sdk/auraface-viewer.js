@@ -78,6 +78,7 @@ class AuraFaceViewer {
                         max-width: 640px;
                         border: 2px solid #ddd;
                         border-radius: 5px;
+                        transform: scaleX(-1); /* 鏡像翻轉顯示 */
                     }
                     .auraface-overlay {
                         position: absolute;
@@ -86,6 +87,7 @@ class AuraFaceViewer {
                         pointer-events: none;
                         border: 2px solid #ddd;
                         border-radius: 5px;
+                        /* overlay 不翻轉，直接顯示正確座標 */
                     }
                     .auraface-controls {
                         margin: 10px 0;
@@ -310,6 +312,7 @@ class AuraFaceViewer {
         canvas.height = Math.min(this.elements.video.videoHeight, 360);
         
         const ctx = canvas.getContext('2d');
+        // 發送原始影像數據，不翻轉
         ctx.drawImage(this.elements.video, 0, 0, canvas.width, canvas.height);
         
         // 降低品質加快編碼
@@ -460,10 +463,14 @@ ${data.faces.map(face =>
         this.currentFaces.forEach(face => {
             const [x1, y1, x2, y2] = face.bbox;
             
-            // 將伺服器座標轉換為顯示座標
-            const displayX1 = x1 * scaleX;
+            // 後端返回原始影像座標，但用戶看到翻轉的video，需要翻轉座標匹配
+            const mirrorX1 = videoWidth - x2;
+            const mirrorX2 = videoWidth - x1;
+            
+            // 將翻轉後的座標轉換為顯示座標
+            const displayX1 = mirrorX1 * scaleX;
             const displayY1 = y1 * scaleY;
-            const displayX2 = x2 * scaleX;
+            const displayX2 = mirrorX2 * scaleX;
             const displayY2 = y2 * scaleY;
             
             let color;
