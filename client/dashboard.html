@@ -32,8 +32,9 @@
             border-bottom: 2px solid var(--primary-color); padding-bottom: 10px;
         }
         #realtime-container { grid-column: 1 / 2; }
-        #management-container { grid-column: 2 / 3; grid-row: 1 / 3; }
-        #stats-container { grid-column: 1 / 2; }
+        #register-container { grid-column: 2 / 3; }
+        #stats-container { grid-column: 1 / 3; }
+        #management-container { grid-column: 1 / 3; }
         video { 
             width: 100%; 
             height: auto; 
@@ -89,7 +90,7 @@
 
     <div class="main-container">
         <div id="realtime-container" class="card">
-            <h2 class="card-title">📹 即時監控與註冊</h2>
+            <h2 class="card-title">📹 即時監控</h2>
             <div id="connectionStatus" class="status status-disconnected">未連接</div>
             <div class="controls">
                 <button id="connectWS" class="btn-success">連接</button>
@@ -107,11 +108,16 @@
             <div id="recognitionInfo" style="margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 5px; font-family: monospace; font-size: 14px;">
                 等待識別結果...
             </div>
-            <div class="register-form" style="margin-top: 20px;">
+        </div>
+
+        <div id="register-container" class="card">
+            <h2 class="card-title">➕ 人員註冊</h2>
+            <div class="register-form">
                 <div class="form-group"><label for="personName">姓名：</label><input type="text" id="personName"></div>
                 <div class="form-group"><label for="personEmployeeId">員工編號：</label><input type="text" id="personEmployeeId" placeholder="選填"></div>
                 <div class="form-group"><label for="personRole">身分：</label><select id="personRole"><option value="員工">員工</option><option value="訪客">訪客</option></select></div>
                 <div class="form-group"><label for="personDept">部門：</label><input type="text" id="personDept"></div>
+                <div class="form-group"><label for="personEmail">信箱：</label><input type="email" id="personEmail" placeholder="選填"></div>
                 <button id="captureRegister" class="btn-success">拍照註冊</button>
             </div>
         </div>
@@ -126,7 +132,19 @@
             <button id="refreshPersons" class="btn-info">🔄 刷新列表</button>
             <div style="overflow-x: auto; max-height: 80vh;">
                 <table id="personsTable">
-                    <thead><tr><th>ID</th><th>姓名</th><th>員工編號</th><th>身分</th><th>部門</th><th>操作</th></tr></thead>
+                    <thead><tr><th>ID</th><th>姓名</th><th>員工編號</th><th>身分</th><th>部門</th><th>信箱</th><th>操作</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="attendance-container" class="card">
+            <h2 class="card-title">🕒 出勤記錄</h2>
+            <button id="refreshAttendance" class="btn-info">🔄 刷新記錄</button>
+            <button id="clearAttendance" class="btn-warning">🗑️ 清除記錄</button>
+            <div style="overflow-x: auto; max-height: 80vh;">
+                <table id="attendanceTable">
+                    <thead><tr><th>姓名</th><th>狀態</th><th>首次出現</th><th>最後見到</th><th>離開時間</th><th>在席時長</th><th>詳細資訊</th></tr></thead>
                     <tbody></tbody>
                 </table>
             </div>
@@ -141,6 +159,7 @@
             <div class="form-group"><label for="editPersonEmployeeId">員工編號：</label><input type="text" id="editPersonEmployeeId" placeholder="選填"></div>
             <div class="form-group"><label for="editPersonRole">身分：</label><select id="editPersonRole"><option value="員工">員工</option><option value="訪客">訪客</option></select></div>
             <div class="form-group"><label for="editPersonDept">部門：</label><input type="text" id="editPersonDept"></div>
+            <div class="form-group"><label for="editPersonEmail">信箱：</label><input type="email" id="editPersonEmail" placeholder="選填"></div>
             <div class="modal-actions">
                 <button id="saveChanges" class="btn-success">儲存</button>
                 <button id="closeModal" class="btn-danger">取消</button>
@@ -171,6 +190,7 @@
                 connectionStatus.textContent = '✅ 已連接';
                 connectionStatus.className = 'status status-connected';
                 loadPersons(); // Auto-refresh on connect
+                loadAttendance(); // Auto-refresh attendance on connect
             };
 
             websocket.onmessage = (event) => {
@@ -203,11 +223,18 @@
                 case 'persons_list':
                     renderPersonsTable(data.data);
                     break;
+                case 'attendance_list':
+                    renderAttendanceTable(data.data);
+                    break;
                 case 'register_result':
                 case 'update_result':
                 case 'delete_result':
+                case 'clear_attendance_result':
                     showNotification(data.success ? `✅ ${data.message}` : `❌ ${data.message}`, data.success ? 'success' : 'error');
-                    if (data.success) loadPersons();
+                    if (data.success) {
+                        loadPersons();
+                        if (data.type === 'clear_attendance_result') loadAttendance();
+                    }
                     if (data.type === 'update_result') closeModal();
                     break;
                 case 'person_detected':
@@ -373,15 +400,15 @@ ${data.faces.map(face =>
         function renderPersonsTable(persons) {
             personsTableBody.innerHTML = '';
             if (!persons || persons.length === 0) {
-                personsTableBody.innerHTML = '<tr><td colspan="6" style="text-align:center;">沒有資料</td></tr>';
+                personsTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">沒有資料</td></tr>';
                 return;
             }
             persons.forEach(p => {
                 const row = personsTableBody.insertRow();
                 row.innerHTML = `
-                    <td>${p.person_id}</td><td>${p.name}</td><td>${p.employee_id || 'N/A'}</td><td>${p.role}</td><td>${p.department || 'N/A'}</td>
+                    <td>${p.person_id}</td><td>${p.name}</td><td>${p.employee_id || 'N/A'}</td><td>${p.role}</td><td>${p.department || 'N/A'}</td><td>${p.email || 'N/A'}</td>
                     <td>
-                        <button class="btn-warning btn-sm" onclick="openEditModal('${p.person_id}', '${p.name}', '${p.employee_id || ''}', '${p.role}', '${p.department || ''}')">修改</button>
+                        <button class="btn-warning btn-sm" onclick="openEditModal('${p.person_id}', '${p.name}', '${p.employee_id || ''}', '${p.role}', '${p.department || ''}', '${p.email || ''}')">修改</button>
                         <button class="btn-danger btn-sm" onclick="deletePerson('${p.person_id}', '${p.name}')">刪除</button>
                     </td>`;
             });
@@ -399,13 +426,15 @@ ${data.faces.map(face =>
         const personEmployeeIdInput = document.getElementById('editPersonEmployeeId');
         const personRoleInput = document.getElementById('editPersonRole');
         const personDeptInput = document.getElementById('editPersonDept');
+        const personEmailInput = document.getElementById('editPersonEmail');
 
-        function openEditModal(id, name, employee_id, role, dept) {
+        function openEditModal(id, name, employee_id, role, dept, email) {
             personIdInput.value = id;
             personNameInput.value = name;
             personEmployeeIdInput.value = employee_id || '';
             personRoleInput.value = role;
             personDeptInput.value = dept;
+            personEmailInput.value = email || '';
             modal.style.display = 'flex';
         }
 
@@ -418,7 +447,8 @@ ${data.faces.map(face =>
                 name: personNameInput.value,
                 employee_id: personEmployeeIdInput.value,
                 role: personRoleInput.value,
-                department: personDeptInput.value
+                department: personDeptInput.value,
+                email: personEmailInput.value
             });
         }
         
@@ -438,6 +468,7 @@ ${data.faces.map(face =>
                 employee_id: document.getElementById('personEmployeeId').value.trim(),
                 role: document.getElementById('personRole').value,
                 department: document.getElementById('personDept').value.trim(),
+                email: document.getElementById('personEmail').value.trim(),
                 image: imageData
             });
         }
@@ -580,12 +611,46 @@ ${data.faces.map(face =>
             }
         });
 
+        // --- Attendance Management Logic ---
+        function loadAttendance() { 
+            sendToServer({ type: 'get_attendance' }); 
+        }
+
+        function renderAttendanceTable(records) {
+            const attendanceTableBody = document.querySelector('#attendanceTable tbody');
+            attendanceTableBody.innerHTML = '';
+            if (!records || records.length === 0) {
+                attendanceTableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">沒有出勤記錄</td></tr>';
+                return;
+            }
+            records.forEach(record => {
+                const row = attendanceTableBody.insertRow();
+                row.innerHTML = `
+                    <td>${record.name}</td>
+                    <td><span style="color: ${record.status === '活躍' ? 'green' : 'gray'}">${record.status}</span></td>
+                    <td><small>${record.arrival_time}</small></td>
+                    <td><small>${record.last_seen_time || '無'}</small></td>
+                    <td><small>${record.departure_time}</small></td>
+                    <td>${record.duration}</td>
+                    <td><small>ID: ${record.person_id || '無'}<br>部門: ${record.department || '未設定'}</small></td>
+                `;
+            });
+        }
+
+        function clearAttendance() {
+            if (confirm('確定要清除所有出勤記錄嗎？')) {
+                sendToServer({ type: 'clear_attendance' });
+            }
+        }
+
         // --- Event Listeners ---
         document.getElementById('connectWS').addEventListener('click', connectWebSocket);
         document.getElementById('startCamera').addEventListener('click', startCamera);
         document.getElementById('stopCamera').addEventListener('click', stopCamera);
         document.getElementById('captureRegister').addEventListener('click', captureForRegistration);
         document.getElementById('refreshPersons').addEventListener('click', loadPersons);
+        document.getElementById('refreshAttendance').addEventListener('click', loadAttendance);
+        document.getElementById('clearAttendance').addEventListener('click', clearAttendance);
         document.getElementById('saveChanges').addEventListener('click', saveChanges);
         document.getElementById('closeModal').addEventListener('click', closeModal);
         window.addEventListener('load', connectWebSocket);

@@ -13,6 +13,7 @@ docker compose up -d
 **服務端點**：
 - 網頁界面：http://localhost:7860
 - WebSocket：ws://localhost:7861
+- **REST API**：http://localhost:7859  🆕
 - PostgreSQL：localhost:5432
 
 ## 📋 使用方式
@@ -40,7 +41,21 @@ ws.onmessage = (event) => {
 };
 ```
 
-### 3. 資料庫管理
+### 3. REST API 接口 🆕
+```bash
+# 健康檢查
+curl "http://localhost:7859/api/health"
+
+# 獲取出勤記錄
+curl "http://localhost:7859/api/attendance?limit=5"
+
+# 按姓名查詢
+curl "http://localhost:7859/api/attendance?name=CSL"
+```
+
+**完整 API 文檔**：[API_GUIDE.md](./API_GUIDE.md) | [Swagger UI](http://localhost:7859/docs)
+
+### 4. 資料庫管理
 - **網頁管理**：http://localhost:7860 → 「資料庫管理」標籤
 - **直接連接**：
 ```bash
@@ -50,6 +65,12 @@ docker exec auraface-postgres psql -U auraface -d auraface
 ## 🏗️ 架構
 
 **技術棧**：AuraFace + PostgreSQL + WebSocket + Docker
+
+**目錄結構**：
+- `api/` - REST API 模組 ([說明文檔](./api/README.md))
+- `client/` - 前端 SDK 與範例
+- `models/` - AI 模型檔案
+- `test_data/` - 測試用圖片與影片
 
 ## 🔧 設定
 

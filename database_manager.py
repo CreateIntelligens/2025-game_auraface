@@ -10,13 +10,14 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
 from datetime import datetime
+import pytz
 from pgvector.psycopg2 import register_vector
 
 class PostgresFaceDatabase:
     def __init__(self, database_url=None):
         if database_url is None:
             database_url = os.getenv('DATABASE_URL', 
-                'postgresql://auraface:auraface123@localhost:5432/auraface')
+                'postgresql://ai360:ai360@postgres:5432/auraface')
         
         self.database_url = database_url
         self.conn = None
@@ -62,6 +63,7 @@ class PostgresFaceDatabase:
                 'name': info['name'],
                 'role': info['role'],
                 'department': info.get('department', ''),
+                'email': info.get('email', ''),
                 'register_time': info['register_time'],
                 'embedding': info['embedding'].tolist()
             }
@@ -69,7 +71,7 @@ class PostgresFaceDatabase:
         with open(self.database_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     
-    def register_face(self, name, role, department, embedding, employee_id=None):
+    def register_face(self, name, role, department, embedding, employee_id=None, email=None):
         """註冊新人臉"""
         try:
             # 生成唯一的 person_id，使用UUID確保絕對唯一性
@@ -93,6 +95,7 @@ class PostgresFaceDatabase:
                     'role': role,
                     'department': department,
                     'employee_id': employee_id,
+                    'email': email,
                     'register_time': datetime.now().isoformat(),
                     'embedding': embedding
                 }
@@ -102,9 +105,9 @@ class PostgresFaceDatabase:
             # PostgreSQL 模式
             with self.conn.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO face_profiles (person_id, employee_id, name, role, department, face_embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (person_id, employee_id, name, role, department, embedding.tolist()))
+                    INSERT INTO face_profiles (person_id, employee_id, name, role, department, email, face_embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (person_id, employee_id, name, role, department, email, embedding.tolist()))
                 self.conn.commit()
             
             return True, f"成功註冊 {name}（ID: {person_id}）"
@@ -173,7 +176,7 @@ class PostgresFaceDatabase:
             
             with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT person_id, employee_id, name, role, department, register_time
+                    SELECT person_id, employee_id, name, role, department, email, register_time
                     FROM face_profiles
                     ORDER BY register_time DESC
                 """)
@@ -185,6 +188,7 @@ class PostgresFaceDatabase:
                         'role': row['role'],
                         'department': row['department'] or '',
                         'employee_id': row['employee_id'] or '',
+                        'email': row['email'] or '',
                         'register_time': row['register_time'].isoformat() if row['register_time'] else ''
                     }
                 
@@ -207,7 +211,7 @@ class PostgresFaceDatabase:
             'visitors': visitors
         }
 
-    def update_face(self, person_id, name, employee_id, role, department):
+    def update_face(self, person_id, name, employee_id, role, department, email=None):
         """更新現有人臉資料"""
         try:
             if hasattr(self, 'use_postgres') and not self.use_postgres:
@@ -217,6 +221,7 @@ class PostgresFaceDatabase:
                     self.faces[person_id]['employee_id'] = employee_id
                     self.faces[person_id]['role'] = role
                     self.faces[person_id]['department'] = department
+                    self.faces[person_id]['email'] = email
                     self.save_json_database()
                     return True, f"成功更新 {name}"
                 return False, "找不到指定人員"
@@ -225,9 +230,9 @@ class PostgresFaceDatabase:
             with self.conn.cursor() as cursor:
                 cursor.execute("""
                     UPDATE face_profiles
-                    SET name = %s, employee_id = %s, role = %s, department = %s
+                    SET name = %s, employee_id = %s, role = %s, department = %s, email = %s
                     WHERE person_id = %s
-                """, (name, employee_id, role, department, person_id))
+                """, (name, employee_id, role, department, email, person_id))
                 self.conn.commit()
                 if cursor.rowcount == 0:
                     return False, f"找不到 ID 為 {person_id} 的人員"
@@ -250,13 +255,14 @@ class PostgresFaceDatabase:
 
             # PostgreSQL 模式
             with self.conn.cursor() as cursor:
-                # 也需要刪除相關的日誌
+                # 也需要刪除相關的日誌和會話
+                cursor.execute("DELETE FROM attendance_sessions WHERE person_id = %s", (person_id,))
                 cursor.execute("DELETE FROM recognition_logs WHERE person_id = %s", (person_id,))
                 cursor.execute("DELETE FROM face_profiles WHERE person_id = %s", (person_id,))
                 self.conn.commit()
                 if cursor.rowcount == 0:
                     return False, f"找不到 ID 為 {person_id} 的人員"
-            return True, f"成功刪除 ID {person_id} 及其相關日誌"
+            return True, f"成功刪除 ID {person_id} 及其相關日誌和會話"
         except Exception as e:
             if self.conn:
                 self.conn.rollback()
@@ -278,7 +284,244 @@ class PostgresFaceDatabase:
                 
         except Exception as e:
             print(f"日誌記錄錯誤: {e}")
+
+    def log_attendance(self, person_id):
+        """記錄或更新一個出勤會話"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return  # JSON 模式不支援此功能
+
+            taipei_tz = pytz.timezone('Asia/Taipei')
+            now = datetime.now(taipei_tz)
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                # 檢查是否有正在進行的會話
+                cursor.execute("""
+                    SELECT session_uuid FROM attendance_sessions
+                    WHERE person_id = %s AND status = 'active'
+                """, (person_id,))
+                active_session = cursor.fetchone()
+
+                if active_session:
+                    # 如果有，只更新 last_seen_at
+                    cursor.execute("""
+                        UPDATE attendance_sessions
+                        SET last_seen_at = %s
+                        WHERE session_uuid = %s
+                    """, (now, active_session['session_uuid']))
+                    session_uuid = active_session['session_uuid']
+                else:
+                    # 如果沒有，則創建新會話
+                    import uuid
+                    session_uuid = str(uuid.uuid4())
+                    cursor.execute("""
+                        INSERT INTO attendance_sessions (session_uuid, person_id, arrival_time, last_seen_at, status)
+                        VALUES (%s, %s, %s, %s, 'active')
+                    """, (session_uuid, person_id, now, now))
+                self.conn.commit()
+                return session_uuid
+        except Exception as e:
+            print(f"出勤記錄錯誤: {e}")
+            import traceback
+            traceback.print_exc()
+            if self.conn:
+                self.conn.rollback()
+            return None
+
+    def end_timed_out_sessions(self, timeout_seconds=300):
+        """結束超時的出勤會話"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return # JSON 模式不支援此功能
+
+            with self.conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE attendance_sessions
+                    SET status = 'ended', departure_time = last_seen_at
+                    WHERE status = 'active' AND (NOW() - last_seen_at) > INTERVAL '%s seconds'
+                """, (timeout_seconds,))
+                updated_rows = cursor.rowcount
+                self.conn.commit()
+                if updated_rows > 0:
+                    print(f"結束了 {updated_rows} 個超時會話。")
+        except Exception as e:
+            print(f"結束超時會話時出錯: {e}")
+            if self.conn:
+                self.conn.rollback()
     
+    def get_recent_attendees(self, minutes=10):
+        """取得最近N分鐘內出現的人員"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return []
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT DISTINCT 
+                        a.person_id,
+                        f.name,
+                        f.role,
+                        f.department,
+                        MAX(a.last_seen_at) as last_seen,
+                        COUNT(a.id) as session_count
+                    FROM attendance_sessions a
+                    JOIN face_profiles f ON a.person_id = f.person_id
+                    WHERE a.last_seen_at >= NOW() - INTERVAL '%s minutes'
+                    GROUP BY a.person_id, f.name, f.role, f.department
+                    ORDER BY last_seen DESC
+                """, (minutes,))
+                
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        'person_id': row['person_id'],
+                        'name': row['name'],
+                        'role': row['role'],
+                        'department': row['department'] or '',
+                        'last_seen': row['last_seen'],
+                        'session_count': row['session_count']
+                    })
+                return results
+                
+        except Exception as e:
+            print(f"查詢最近出勤錯誤: {e}")
+            return []
+
+    def get_attendance_history(self, person_id=None, days=7):
+        """取得出勤歷史記錄"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return []
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                if person_id:
+                    cursor.execute("""
+                        SELECT 
+                            a.session_uuid,
+                            a.person_id,
+                            f.name,
+                            a.arrival_time,
+                            a.last_seen_at,
+                            a.departure_time,
+                            a.status,
+                            EXTRACT(EPOCH FROM (COALESCE(a.departure_time, a.last_seen_at) - a.arrival_time))/60 as duration_minutes
+                        FROM attendance_sessions a
+                        JOIN face_profiles f ON a.person_id = f.person_id
+                        WHERE a.person_id = %s 
+                        AND a.arrival_time >= NOW() - INTERVAL '%s days'
+                        ORDER BY a.arrival_time DESC
+                    """, (person_id, days))
+                else:
+                    cursor.execute("""
+                        SELECT 
+                            a.session_uuid,
+                            a.person_id,
+                            f.name,
+                            a.arrival_time,
+                            a.last_seen_at,
+                            a.departure_time,
+                            a.status,
+                            EXTRACT(EPOCH FROM (COALESCE(a.departure_time, a.last_seen_at) - a.arrival_time))/60 as duration_minutes
+                        FROM attendance_sessions a
+                        JOIN face_profiles f ON a.person_id = f.person_id
+                        WHERE a.arrival_time >= NOW() - INTERVAL '%s days'
+                        ORDER BY a.arrival_time DESC
+                    """, (days,))
+                
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        'session_uuid': row['session_uuid'],
+                        'person_id': row['person_id'],
+                        'name': row['name'],
+                        'arrival_time': row['arrival_time'],
+                        'last_seen_at': row['last_seen_at'],
+                        'departure_time': row['departure_time'],
+                        'status': row['status'],
+                        'duration_minutes': float(row['duration_minutes']) if row['duration_minutes'] else 0
+                    })
+                return results
+                
+        except Exception as e:
+            print(f"查詢出勤歷史錯誤: {e}")
+            return []
+
+    def get_attendance_summary(self, person_id):
+        """取得某人的出勤統計摘要"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return {}
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total_sessions,
+                        MIN(arrival_time) as first_seen,
+                        MAX(last_seen_at) as last_seen,
+                        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_sessions,
+                        AVG(EXTRACT(EPOCH FROM (COALESCE(departure_time, last_seen_at) - arrival_time))/60) as avg_duration_minutes,
+                        COUNT(DISTINCT DATE(arrival_time)) as unique_days
+                    FROM attendance_sessions
+                    WHERE person_id = %s
+                """, (person_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'total_sessions': row['total_sessions'],
+                        'first_seen': row['first_seen'],
+                        'last_seen': row['last_seen'],
+                        'active_sessions': row['active_sessions'],
+                        'avg_duration_minutes': float(row['avg_duration_minutes']) if row['avg_duration_minutes'] else 0,
+                        'unique_days': row['unique_days']
+                    }
+                return {}
+                
+        except Exception as e:
+            print(f"查詢出勤統計錯誤: {e}")
+            return {}
+
+    def get_current_attendees(self):
+        """取得目前在場的人員"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return []
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        a.session_uuid,
+                        a.person_id,
+                        f.name,
+                        f.role,
+                        f.department,
+                        a.arrival_time,
+                        a.last_seen_at,
+                        EXTRACT(EPOCH FROM (NOW() - a.arrival_time))/60 as duration_minutes
+                    FROM attendance_sessions a
+                    JOIN face_profiles f ON a.person_id = f.person_id
+                    WHERE a.status = 'active'
+                    ORDER BY a.arrival_time
+                """)
+                
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        'session_uuid': row['session_uuid'],
+                        'person_id': row['person_id'],
+                        'name': row['name'],
+                        'role': row['role'],
+                        'department': row['department'] or '',
+                        'arrival_time': row['arrival_time'],
+                        'last_seen_at': row['last_seen_at'],
+                        'duration_minutes': float(row['duration_minutes'])
+                    })
+                return results
+                
+        except Exception as e:
+            print(f"查詢目前在場人員錯誤: {e}")
+            return []
+
     def close(self):
         """關閉資料庫連接"""
         if self.conn:

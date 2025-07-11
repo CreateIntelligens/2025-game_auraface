@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 import json
 import time
 from datetime import datetime
+import pytz # 匯入 pytz
 from huggingface_hub import snapshot_download
 from insightface.app import FaceAnalysis
 import threading
@@ -138,6 +139,9 @@ class FaceDatabase:
                 # 轉換 embedding 從 list 回 numpy array
                 for person_id in data:
                     data[person_id]['embedding'] = np.array(data[person_id]['embedding'])
+                    # 確保向下兼容，如果沒有 email 欄位則設為空字串
+                    if 'email' not in data[person_id]:
+                        data[person_id]['email'] = ''
                 return data
         return {}
     
@@ -153,6 +157,7 @@ class FaceDatabase:
                 'name': info['name'],
                 'role': info['role'],
                 'department': info.get('department', ''),
+                'email': info.get('email', ''),
                 'register_time': info['register_time'],
                 'embedding': info['embedding'].tolist()
             }
@@ -160,7 +165,7 @@ class FaceDatabase:
         with open(self.database_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     
-    def register_face(self, name, role, department, image):
+    def register_face(self, name, role, department, image, email=None):
         """註冊新人臉"""
         try:
             print(f"📝 開始註冊: {name} ({role})")
@@ -186,7 +191,7 @@ class FaceDatabase:
             
             if self.use_postgres:
                 # 使用 PostgreSQL
-                result = self.db.register_face(name, role, department, embedding)
+                result = self.db.register_face(name, role, department, embedding, email=email)
                 print(f"✅ PostgreSQL 註冊結果: {result}")
                 return result
             else:
@@ -196,6 +201,7 @@ class FaceDatabase:
                     'name': name,
                     'role': role,
                     'department': department,
+                    'email': email,
                     'register_time': datetime.now().isoformat(),
                     'embedding': embedding
                 }
@@ -241,8 +247,14 @@ class FaceDatabase:
                     if matches:
                         best_match = matches[0]  # 取得最佳匹配
                         print(f"✅ 最佳匹配: {best_match['name']} (信心度: {best_match['confidence']:.3f})")
+                        
+                        # 記錄單次識別事件
                         self.db.log_recognition(best_match['person_id'], best_match['name'], 
                                               best_match['confidence'], "gradio_upload")
+                        
+                        # 記錄或更新出勤會話
+                        self.db.log_attendance(best_match['person_id'])
+
                         results.append({
                             'bbox': face.bbox,
                             'person_id': best_match['person_id'],
@@ -375,7 +387,7 @@ def draw_face_boxes(image, results):
     # 轉換回 PIL 格式
     return Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
 
-def register_new_face(name, role, department, image):
+def register_new_face(name, role, department, email, image):
     """註冊新人臉的 Gradio 函數"""
     if not name or not role:
         return "請填寫姓名和身分"
@@ -383,7 +395,7 @@ def register_new_face(name, role, department, image):
     if image is None:
         return "請上傳圖片"
     
-    success, message = face_db.register_face(name, role, department, image)
+    success, message = face_db.register_face(name, role, department, image, None, email)
     return message
 
 def identify_faces(image):
@@ -591,6 +603,7 @@ def get_all_users():
                     info['name'],
                     info['role'],
                     info.get('department', ''),
+                    info.get('email', ''),
                     info.get('register_time', '')
                 ])
             return users
@@ -602,13 +615,14 @@ def get_all_users():
                     info['name'],
                     info['role'],
                     info.get('department', ''),
+                    info.get('email', ''),
                     info.get('register_time', '')
                 ])
             return users
     except Exception as e:
-        return [["錯誤", str(e), "", "", ""]]
+        return [["錯誤", str(e), "", "", "", ""]]
 
-def update_user(person_id, name, role, department):
+def update_user(person_id, name, role, department, email):
     """更新用戶資訊"""
     try:
         if not person_id:
@@ -618,9 +632,9 @@ def update_user(person_id, name, role, department):
             cursor = face_db.db.conn.cursor()
             cursor.execute("""
                 UPDATE face_profiles 
-                SET name = %s, role = %s, department = %s, updated_at = NOW()
+                SET name = %s, role = %s, department = %s, email = %s, updated_at = NOW()
                 WHERE person_id = %s
-            """, (name, role, department, person_id))
+            """, (name, role, department, email, person_id))
             face_db.db.conn.commit()
             cursor.close()
             
@@ -630,7 +644,8 @@ def update_user(person_id, name, role, department):
                 face_db.faces[person_id]['name'] = name
                 face_db.faces[person_id]['role'] = role
                 face_db.faces[person_id]['department'] = department
-                face_db.save_faces()
+                face_db.faces[person_id]['email'] = email
+                face_db.save_database()
                 return f"用戶 {person_id} 更新成功"
             else:
                 return "用戶不存在"
@@ -670,7 +685,8 @@ def get_recognition_logs():
                 FROM recognition_logs 
                 ORDER BY recognition_time DESC 
                 LIMIT 50
-            """)
+            """
+            )
             logs = cursor.fetchall()
             cursor.close()
             
@@ -689,6 +705,86 @@ def get_recognition_logs():
     except Exception as e:
         return [["錯誤", str(e), "", "", ""]]
 
+def get_attendance_logs():
+    """取得出勤日誌"""
+    try:
+        if face_db.use_postgres:
+            cursor = face_db.db.conn.cursor()
+            # Join with face_profiles to get the name
+            cursor.execute("""
+                SELECT 
+                    p.name,
+                    s.status,
+                    s.arrival_time,
+                    s.departure_time,
+                    s.last_seen_at,
+                    s.person_id
+                FROM attendance_sessions s
+                JOIN face_profiles p ON s.person_id = p.person_id
+                ORDER BY s.last_seen_at DESC 
+                LIMIT 100
+            """
+            )
+            logs = cursor.fetchall()
+            cursor.close()
+            
+            result = []
+            taipei_tz = pytz.timezone('Asia/Taipei')
+            
+            for log in logs:
+                name, status, arrival, departure, last_seen, person_id = log
+                
+                # 確保時間都有時區資訊
+                if arrival and arrival.tzinfo is None:
+                    arrival = taipei_tz.localize(arrival)
+                if departure and departure.tzinfo is None:
+                    departure = taipei_tz.localize(departure)
+                
+                # Format times
+                arrival_str = arrival.strftime("%Y-%m-%d %H:%M:%S") if arrival else ""
+                departure_str = departure.strftime("%Y-%m-%d %H:%M:%S") if departure else "在席中"
+                
+                # Calculate duration
+                duration_str = ""
+                if arrival and departure:
+                    duration = departure - arrival
+                    total_seconds = int(duration.total_seconds())
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    if hours > 0:
+                        duration_str = f"{hours}時{minutes}分"
+                    elif minutes > 0:
+                        duration_str = f"{minutes}分{seconds}秒"
+                    else:
+                        duration_str = f"{seconds}秒"
+                elif arrival:
+                    # Calculate ongoing duration
+                    now = datetime.now(taipei_tz)
+                    duration = now - arrival
+                    total_seconds = int(duration.total_seconds())
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    if hours > 0:
+                        duration_str = f"已持續 {hours}時{minutes}分"
+                    else:
+                        duration_str = f"已持續 {minutes}分鐘"
+
+                result.append([
+                    name,
+                    "活躍" if status == 'active' else "結束",
+                    arrival_str,
+                    departure_str,
+                    duration_str
+                ])
+            return result
+        else:
+            return [["JSON模式", "不支援", "", "", ""]]
+    except Exception as e:
+        print(f"取得出勤日誌錯誤: {e}")
+        import traceback
+        traceback.print_exc()
+        return [["錯誤", str(e), "", "", ""]]
+
 def clear_logs():
     """清除識別日誌"""
     try:
@@ -698,6 +794,20 @@ def clear_logs():
             face_db.db.conn.commit()
             cursor.close()
             return "日誌清除成功"
+        else:
+            return "JSON模式不支援日誌清除"
+    except Exception as e:
+        return f"清除失敗: {str(e)}"
+
+def clear_attendance_logs():
+    """清除出勤日誌"""
+    try:
+        if face_db.use_postgres:
+            cursor = face_db.db.conn.cursor()
+            cursor.execute("DELETE FROM attendance_sessions")
+            face_db.db.conn.commit()
+            cursor.close()
+            return "出勤日誌清除成功"
         else:
             return "JSON模式不支援日誌清除"
     except Exception as e:
@@ -723,6 +833,7 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                         value="員工"
                     )
                     reg_dept = gr.Textbox(label="部門", placeholder="請輸入部門（可選）")
+                    reg_email = gr.Textbox(label="電子信箱", placeholder="請輸入電子信箱（可選）")
                     reg_btn = gr.Button("註冊", variant="primary")
                 
                 with gr.Column():
@@ -730,7 +841,7 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
             
             reg_btn.click(
                 register_new_face,
-                inputs=[reg_name, reg_role, reg_dept, reg_image],
+                inputs=[reg_name, reg_role, reg_dept, reg_email, reg_image],
                 outputs=reg_result
             )
         
@@ -772,8 +883,8 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                         with gr.Column():
                             refresh_users_btn = gr.Button("刷新用戶列表", variant="secondary")
                             user_table = gr.Dataframe(
-                                headers=["用戶ID", "姓名", "身分", "部門", "註冊時間"],
-                                datatype=["str", "str", "str", "str", "str"],
+                                headers=["用戶ID", "姓名", "身分", "部門", "電子信箱", "註冊時間"],
+                                datatype=["str", "str", "str", "str", "str", "str"],
                                 value=get_all_users(),
                                 interactive=False
                             )
@@ -784,6 +895,7 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                             edit_name = gr.Textbox(label="姓名")
                             edit_role = gr.Dropdown(choices=["員工", "訪客"], label="身分")
                             edit_department = gr.Textbox(label="部門")
+                            edit_email = gr.Textbox(label="電子信箱")
                             
                             with gr.Row():
                                 update_btn = gr.Button("更新用戶", variant="primary")
@@ -805,6 +917,21 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                     )
                     
                     log_operation_result = gr.Textbox(label="操作結果", lines=2)
+
+                # 出勤紀錄 (NEW TAB)
+                with gr.TabItem("🕒 出勤紀錄"):
+                    with gr.Row():
+                        refresh_attendance_logs_btn = gr.Button("刷新出勤紀錄", variant="secondary")
+                        clear_attendance_logs_btn = gr.Button("清除出勤紀錄", variant="stop")
+                    
+                    attendance_log_table = gr.Dataframe(
+                        headers=["姓名", "狀態", "到達時間", "離開時間", "在席時長"],
+                        datatype=["str", "str", "str", "str", "str"],
+                        value=get_attendance_logs(),
+                        interactive=False
+                    )
+                    
+                    attendance_log_operation_result = gr.Textbox(label="操作結果", lines=2)
             
             # 事件綁定
             def select_user(evt: gr.SelectData):
@@ -812,15 +939,15 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                 users = get_all_users()
                 if row < len(users):
                     user = users[row]
-                    return user[0], user[1], user[2], user[3]
-                return "", "", "", ""
+                    return user[0], user[1], user[2], user[3], user[4]
+                return "", "", "", "", ""
             
-            user_table.select(select_user, outputs=[edit_person_id, edit_name, edit_role, edit_department])
+            user_table.select(select_user, outputs=[edit_person_id, edit_name, edit_role, edit_department, edit_email])
             
             refresh_users_btn.click(get_all_users, outputs=user_table)
             update_btn.click(
                 update_user,
-                inputs=[edit_person_id, edit_name, edit_role, edit_department],
+                inputs=[edit_person_id, edit_name, edit_role, edit_department, edit_email],
                 outputs=user_operation_result
             ).then(get_all_users, outputs=user_table)
             delete_btn.click(
@@ -831,7 +958,11 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
             
             refresh_logs_btn.click(get_recognition_logs, outputs=log_table)
             clear_logs_btn.click(clear_logs, outputs=log_operation_result).then(get_recognition_logs, outputs=log_table)
-        
+
+            # New bindings for attendance logs
+            refresh_attendance_logs_btn.click(get_attendance_logs, outputs=attendance_log_table)
+            clear_attendance_logs_btn.click(clear_attendance_logs, outputs=attendance_log_operation_result).then(get_attendance_logs, outputs=attendance_log_table)
+
         # 影片處理頁面
         with gr.TabItem("🎬 影片處理"):
             gr.Markdown("## 影片人臉識別")
@@ -868,7 +999,8 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                     # 或直接執行
                     python websocket_realtime.py
                     ```
-                    """)
+                    """
+                    )
                     
                     stream_info = gr.Textbox(
                         label="伺服器狀態", 
@@ -896,11 +1028,103 @@ with gr.Blocks(title="AuraFace 智能識別系統") as demo:
                     - 高畫質識別
                     
                     **效能**: 10-30ms 延遲，支援 10+ FPS
-                    """)
+                    """
+                    )
             
             gr.Button("開啟測試頁面", variant="primary", link="realtime_client.html")
 
+        # API 接口頁面  
+        with gr.TabItem("🔌 API 接口"):
+            gr.Markdown("## 出勤記錄 API")
+            gr.Markdown("提供 JSON 格式的出勤數據查詢接口")
+            
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("""
+                    ### 📋 可用端點
+                    
+                    **查詢所有出勤記錄**
+                    ```
+                    GET http://localhost:7859/api/attendance?limit=10
+                    ```
+                    
+                    **按姓名查詢**
+                    ```
+                    GET http://localhost:7859/api/attendance?name=CSL&limit=5
+                    ```
+                    
+                    **按人員ID查詢**
+                    ```
+                    GET http://localhost:7859/api/attendance?person_id=員工_0001_xxx
+                    ```
+                    
+                    **健康檢查**
+                    ```
+                    GET http://localhost:7859/api/health
+                    ```
+                    
+                    **API 文檔**
+                    ```
+                    GET http://localhost:7859/docs
+                    ```
+                    """)
+                
+                with gr.Column():
+                    api_test_name = gr.Textbox(label="測試姓名查詢", placeholder="輸入姓名")
+                    api_test_limit = gr.Number(label="查詢數量", value=5, minimum=1, maximum=50)
+                    api_test_btn = gr.Button("測試 API", variant="primary")
+                    api_result = gr.JSON(label="API 回應結果", value={})
+            
+            def test_api(name, limit):
+                from api.attendance_api import get_attendance_data_json
+                return get_attendance_data_json(name=name if name else None, limit=int(limit))
+            
+            api_test_btn.click(
+                test_api,
+                inputs=[api_test_name, api_test_limit],
+                outputs=api_result
+            )
+
+# --- 背景任務：定期結束超時的會話 ---
+def session_cleanup_task():
+    """定期檢查並結束超時的會話"""
+    while True:
+        print("背景任務：正在檢查超時會話...")
+        try:
+            if face_db.use_postgres:
+                # 使用 face_db.db 存取 PostgresFaceDatabase 實例
+                face_db.db.end_timed_out_sessions(timeout_seconds=300) # 5分鐘寬限期
+        except Exception as e:
+            print(f"背景任務出錯: {e}")
+        time.sleep(60) # 每60秒檢查一次
+
+# 啟動背景 FastAPI 服務
+def start_background_api():
+    """在背景執行緒中啟動 FastAPI 服務"""
+    try:
+        import subprocess
+        import sys
+        # 在背景啟動 FastAPI 服務
+        api_thread = threading.Thread(
+            target=lambda: subprocess.run([sys.executable, "api/standalone_api.py"]), 
+            daemon=True
+        )
+        api_thread.start()
+        print("✅ 背景 FastAPI 服務已啟動在端口 7859")
+    except Exception as e:
+        print(f"❌ 背景 FastAPI 服務啟動失敗: {e}")
+
 if __name__ == "__main__":
+    # 啟動背景任務執行緒
+    # 只有在使用 PostgreSQL 時才啟動背景任務
+    if face_db.use_postgres:
+        cleanup_thread = threading.Thread(target=session_cleanup_task, daemon=True)
+        cleanup_thread.start()
+        print("✅ 已啟動背景會話清理任務。")
+
+    # 啟動背景 API 服務
+    start_background_api()
+
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,

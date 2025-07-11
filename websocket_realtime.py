@@ -110,7 +110,7 @@ class RealtimeFaceRecognition:
         
         # 資料庫寫入控制（避免重複寫入）
         self.recent_recognitions = {}  # {person_id: last_recognition_time}
-        self.recognition_cooldown = 30  # 同一人30秒內不重複寫入資料庫
+        self.recognition_cooldown = 10  # 同一人10秒內不重複寫入識別日誌
         
         # 智能通知機制
         self.person_detection_history = {}  # {person_id: [detection_times]}
@@ -186,6 +186,10 @@ class RealtimeFaceRecognition:
             await self.update_person(websocket, data)
         elif message_type == 'delete_person':
             await self.delete_person(websocket, data)
+        elif message_type == 'get_attendance':
+            await self.get_attendance_logs(websocket)
+        elif message_type == 'clear_attendance':
+            await self.clear_attendance_logs(websocket)
         else:
             await websocket.send(json.dumps({
                 'type': 'error',
@@ -216,12 +220,13 @@ class RealtimeFaceRecognition:
             employee_id = data.get('employee_id')
             role = data.get('role')
             department = data.get('department')
+            email = data.get('email', '')
             
             if not all([person_id, name, role, department is not None]):
                 await websocket.send(json.dumps({'type': 'update_result', 'success': False, 'message': '缺少必要資料'}))
                 return
 
-            success, message = face_db.update_face(person_id, name, employee_id, role, department)
+            success, message = face_db.update_face(person_id, name, employee_id, role, department, email)
             await websocket.send(json.dumps({
                 'type': 'update_result',
                 'success': success,
@@ -354,17 +359,19 @@ class RealtimeFaceRecognition:
                     # 智能通知機制：穩定識別確認
                     await self.handle_person_detection(person_id, best_match, current_time)
                     
-                    # 智能寫入：同一人在cooldown時間內不重複寫入資料庫
-                    should_log = False
+                    # 方案2：分離識別日誌和出勤更新
+                    
+                    # 識別日誌：10秒冷卻，統一門檻0.4
+                    should_log_recognition = False
                     if person_id not in self.recent_recognitions:
-                        should_log = True
+                        should_log_recognition = True
                     else:
                         last_time = self.recent_recognitions[person_id]
                         if current_time - last_time > self.recognition_cooldown:
-                            should_log = True
+                            should_log_recognition = True
                     
-                    # 只在高信心度且未重複時寫入資料庫
-                    if should_log and best_match['confidence'] > 0.65:
+                    # 寫入識別日誌（受冷卻限制）
+                    if should_log_recognition and best_match['confidence'] >= 0.4:
                         face_db.log_recognition(
                             person_id, 
                             best_match['name'], 
@@ -372,7 +379,11 @@ class RealtimeFaceRecognition:
                             "websocket_stream"
                         )
                         self.recent_recognitions[person_id] = current_time
-                        print(f"📝 記錄識別: {best_match['name']} (信心度: {best_match['confidence']:.3f})")
+                        print(f"📝 記錄識別日誌: {best_match['name']} (信心度: {best_match['confidence']:.3f})")
+                    
+                    # 出勤更新：不受冷卻限制，每次識別都更新
+                    if best_match['confidence'] >= 0.4:
+                        face_db.log_attendance(person_id)
                     
                     results.append({
                         'bbox': face.bbox.tolist(),
@@ -553,6 +564,7 @@ class RealtimeFaceRecognition:
             role = data.get('role')
             department = data.get('department', '')
             employee_id = data.get('employee_id', '')
+            email = data.get('email', '')
             image_data = data.get('image')
             
             if not all([name, role, image_data]):
@@ -597,7 +609,7 @@ class RealtimeFaceRecognition:
             embedding = faces[0].normed_embedding
             face_area = (faces[0].bbox[2] - faces[0].bbox[0]) * (faces[0].bbox[3] - faces[0].bbox[1])
             print(f"[{datetime.now(TW_TZ).strftime('%H:%M:%S')}] 註冊人臉大小: {face_area:.0f} 像素")
-            success, message = face_db.register_face(name, role, department, embedding, employee_id)
+            success, message = face_db.register_face(name, role, department, embedding, employee_id, email)
             
             await websocket.send(json.dumps({
                 'type': 'register_result',
@@ -610,6 +622,137 @@ class RealtimeFaceRecognition:
                 'type': 'register_result',
                 'success': False,
                 'message': f'註冊錯誤: {str(e)}'
+            }))
+
+    async def get_attendance_logs(self, websocket):
+        """取得出勤記錄"""
+        try:
+            import pytz
+            taipei_tz = pytz.timezone('Asia/Taipei')
+            
+            if hasattr(face_db, 'use_postgres') and not face_db.use_postgres:
+                await websocket.send(json.dumps({
+                    'type': 'attendance_list',
+                    'success': True,
+                    'data': []
+                }))
+                return
+            
+            cursor = face_db.conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    p.name,
+                    p.department,
+                    p.role,
+                    s.status,
+                    s.arrival_time,
+                    s.departure_time,
+                    s.last_seen_at,
+                    s.person_id
+                FROM attendance_sessions s
+                JOIN face_profiles p ON s.person_id = p.person_id
+                ORDER BY s.last_seen_at DESC 
+                LIMIT 100
+            """)
+            logs = cursor.fetchall()
+            cursor.close()
+            
+            result = []
+            for log in logs:
+                name, department, role, status, arrival, departure, last_seen, person_id = log
+                
+                # 確保時間都有時區資訊
+                if arrival and arrival.tzinfo is None:
+                    arrival = taipei_tz.localize(arrival)
+                if departure and departure.tzinfo is None:
+                    departure = taipei_tz.localize(departure)
+                if last_seen and last_seen.tzinfo is None:
+                    last_seen = taipei_tz.localize(last_seen)
+                
+                # Format times
+                arrival_str = arrival.strftime("%m-%d %H:%M:%S") if arrival else ""
+                departure_str = departure.strftime("%m-%d %H:%M:%S") if departure else "在席中"
+                last_seen_str = last_seen.strftime("%m-%d %H:%M:%S") if last_seen else ""
+                
+                # Calculate duration
+                duration_str = ""
+                if arrival and departure:
+                    duration = departure - arrival
+                    total_seconds = int(duration.total_seconds())
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    if hours > 0:
+                        duration_str = f"{hours}時{minutes}分"
+                    elif minutes > 0:
+                        duration_str = f"{minutes}分{seconds}秒"
+                    else:
+                        duration_str = f"{seconds}秒"
+                elif arrival:
+                    # Calculate ongoing duration
+                    from datetime import datetime
+                    now = datetime.now(taipei_tz)
+                    duration = now - arrival
+                    total_seconds = int(duration.total_seconds())
+                    hours, remainder = divmod(total_seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    if hours > 0:
+                        duration_str = f"已持續 {hours}時{minutes}分"
+                    else:
+                        duration_str = f"已持續 {minutes}分鐘"
+
+                result.append({
+                    'name': name,
+                    'status': "活躍" if status == 'active' else "結束",
+                    'arrival_time': arrival_str,
+                    'departure_time': departure_str,
+                    'last_seen_time': last_seen_str,
+                    'duration': duration_str,
+                    'person_id': person_id,
+                    'department': department or '未設定',
+                    'role': role
+                })
+            
+            await websocket.send(json.dumps({
+                'type': 'attendance_list',
+                'success': True,
+                'data': result
+            }))
+            
+        except Exception as e:
+            print(f"取得出勤記錄錯誤: {e}")
+            await websocket.send(json.dumps({
+                'type': 'error',
+                'message': f'取得出勤記錄失敗: {str(e)}'
+            }))
+
+    async def clear_attendance_logs(self, websocket):
+        """清除出勤記錄"""
+        try:
+            if hasattr(face_db, 'use_postgres') and not face_db.use_postgres:
+                await websocket.send(json.dumps({
+                    'type': 'clear_attendance_result',
+                    'success': False,
+                    'message': 'JSON模式不支援清除功能'
+                }))
+                return
+            
+            cursor = face_db.conn.cursor()
+            cursor.execute("DELETE FROM attendance_sessions")
+            face_db.conn.commit()
+            cursor.close()
+            
+            await websocket.send(json.dumps({
+                'type': 'clear_attendance_result',
+                'success': True,
+                'message': '出勤記錄清除成功'
+            }))
+            
+        except Exception as e:
+            print(f"清除出勤記錄錯誤: {e}")
+            await websocket.send(json.dumps({
+                'type': 'clear_attendance_result',
+                'success': False,
+                'message': f'清除失敗: {str(e)}'
             }))
 
 async def main():

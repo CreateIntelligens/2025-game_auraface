@@ -1,3 +1,6 @@
+-- 設定資料庫時區為 UTC+8
+SET TIME ZONE 'Asia/Taipei';
+
 -- 確保資料庫存在並連接
 -- 注意：POSTGRES_DB 環境變數會自動創建資料庫，這裡只是確保
 
@@ -24,9 +27,11 @@ CREATE TABLE IF NOT EXISTS face_profiles (
     name VARCHAR(100) NOT NULL,
     role VARCHAR(20) NOT NULL CHECK (role IN ('員工', '訪客')),
     department VARCHAR(100),
+    email VARCHAR(255),  -- 郵箱地址
     face_embedding VECTOR(512),
     register_time TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    updated_at TIMESTAMP DEFAULT NOW(),
+    last_seen_at TIMESTAMP  -- 最後一次出現時間
 );
 
 -- 創建向量相似度索引 (HNSW - 高效能近似最近鄰搜尋)
@@ -41,6 +46,16 @@ CREATE TABLE IF NOT EXISTS recognition_logs (
     confidence FLOAT,
     recognition_time TIMESTAMP DEFAULT NOW(),
     image_source VARCHAR(100)
+);
+
+-- 創建人臉檢測事件表 (用於外部服務通知)
+CREATE TABLE IF NOT EXISTS detections (
+    id SERIAL PRIMARY KEY,
+    person_id VARCHAR(50) NOT NULL,
+    detected_at TIMESTAMP DEFAULT NOW(),
+    is_processed BOOLEAN DEFAULT FALSE,
+    processed_at TIMESTAMP,
+    FOREIGN KEY (person_id) REFERENCES face_profiles(person_id)
 );
 
 -- 創建更新時間觸發器
@@ -64,3 +79,23 @@ GRANT USAGE ON SCHEMA public TO ai360;
 -- 設定未來創建的表也給予權限
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ai360;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ai360;
+
+-- 創建出勤會話表 (新的在席狀態管理)
+CREATE TABLE IF NOT EXISTS attendance_sessions (
+    id SERIAL PRIMARY KEY,
+    session_uuid VARCHAR(36) UNIQUE NOT NULL,
+    person_id VARCHAR(50) NOT NULL,
+    arrival_time TIMESTAMP NOT NULL,
+    last_seen_at TIMESTAMP NOT NULL,
+    departure_time TIMESTAMP,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('active', 'ended')),
+    FOREIGN KEY (person_id) REFERENCES face_profiles(person_id)
+);
+
+-- 在 last_seen_at 和 session_uuid 創建索引以提高查詢效率
+CREATE INDEX IF NOT EXISTS idx_last_seen_at ON attendance_sessions (last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_session_uuid ON attendance_sessions (session_uuid);
+
+-- 確保 ai360 用戶可以訪問新表
+GRANT ALL PRIVILEGES ON TABLE attendance_sessions TO ai360;
+GRANT ALL PRIVILEGES ON SEQUENCE attendance_sessions_id_seq TO ai360;
