@@ -5,6 +5,7 @@ Claude.md
 test_data/
 tests/
 HARDWARE_REQUIREMENTS.md
+webhook_receiver/
 
 # Python
 __pycache__/

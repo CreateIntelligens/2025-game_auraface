@@ -270,14 +270,30 @@
                 const mirrorX1 = canvasWidth - x2;
                 const mirrorX2 = canvasWidth - x1;
                 
-                overlayCtx.strokeStyle = face.person_id === 'unknown' ? 'red' : 'lime';
+                // 根據信心度決定顏色和顯示內容
+                let color, labelText;
+                if (face.confidence >= 0.4) {
+                    // 高信心度：綠色，顯示姓名和角色
+                    color = face.role === '員工' ? 'lime' : (face.role === '訪客' ? 'yellow' : 'lime');
+                    labelText = `${face.name} (${face.confidence.toFixed(2)})`;
+                } else if (face.confidence >= 0.15 || face.is_uncertain) {
+                    // 中等信心度：橘色，只顯示信心度
+                    color = 'orange';
+                    labelText = `${face.confidence.toFixed(2)}`;
+                } else {
+                    // 低信心度：紅色，陌生人
+                    color = 'red';
+                    labelText = `${face.confidence.toFixed(2)}`;
+                }
+                
+                overlayCtx.strokeStyle = color;
                 overlayCtx.lineWidth = 2;
                 overlayCtx.strokeRect(mirrorX1, y1, mirrorX2 - mirrorX1, y2 - y1);
-                if (face.person_id !== 'unknown') {
-                    overlayCtx.fillStyle = 'lime';
-                    overlayCtx.font = '16px Arial';
-                    overlayCtx.fillText(`${face.name} (${face.confidence.toFixed(2)})`, mirrorX1, y1 > 20 ? y1 - 5 : y1 + 20);
-                }
+                
+                // 顯示標籤
+                overlayCtx.fillStyle = color;
+                overlayCtx.font = '16px Arial';
+                overlayCtx.fillText(labelText, mirrorX1, y1 > 20 ? y1 - 5 : y1 + 20);
             });
 
             // 更新識別資訊

@@ -166,8 +166,51 @@ class PostgresFaceDatabase:
             
         except Exception as e:
             print(f"搜尋錯誤: {e}")
+            # 重要：回滾事務以避免後續操作失敗
+            try:
+                if hasattr(self, 'conn') and self.conn:
+                    self.conn.rollback()
+            except:
+                pass
             return []
     
+    def get_person_by_id(self, person_id):
+        """根據person_id獲取人員資料（包含embedding）"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return self.faces.get(person_id)
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT person_id, employee_id, name, role, department, email, register_time, embedding
+                    FROM face_profiles
+                    WHERE person_id = %s
+                """, (person_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'person_id': row['person_id'],
+                        'employee_id': row['employee_id'] or '',
+                        'name': row['name'],
+                        'role': row['role'],
+                        'department': row['department'] or '',
+                        'email': row['email'] or '',
+                        'register_time': row['register_time'],
+                        'embedding': row['embedding']
+                    }
+                return None
+                
+        except Exception as e:
+            print(f"獲取人員資料錯誤: {e}")
+            # 重要：回滾事務以避免後續操作失敗
+            try:
+                if hasattr(self, 'conn') and self.conn:
+                    self.conn.rollback()
+            except:
+                pass
+            return None
+
     def get_all_faces(self):
         """取得所有人臉資料"""
         try:
@@ -480,6 +523,43 @@ class PostgresFaceDatabase:
         except Exception as e:
             print(f"查詢出勤統計錯誤: {e}")
             return {}
+
+    def get_current_session(self, person_id):
+        """取得指定人員的當前session信息"""
+        try:
+            if hasattr(self, 'use_postgres') and not self.use_postgres:
+                return None
+            
+            with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT 
+                        session_uuid,
+                        person_id,
+                        status,
+                        arrival_time,
+                        departure_time,
+                        last_seen_at
+                    FROM attendance_sessions
+                    WHERE person_id = %s AND status = 'active'
+                    ORDER BY arrival_time DESC
+                    LIMIT 1
+                """, (person_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'session_uuid': row['session_uuid'],
+                        'person_id': row['person_id'],
+                        'status': row['status'],
+                        'arrival_time': row['arrival_time'].isoformat() if row['arrival_time'] else None,
+                        'departure_time': row['departure_time'].isoformat() if row['departure_time'] else None,
+                        'last_seen_at': row['last_seen_at'].isoformat() if row['last_seen_at'] else None
+                    }
+                return None
+                
+        except Exception as e:
+            print(f"查詢當前session錯誤: {e}")
+            return None
 
     def get_current_attendees(self):
         """取得目前在場的人員"""
