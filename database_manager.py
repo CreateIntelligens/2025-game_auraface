@@ -74,18 +74,24 @@ class PostgresFaceDatabase:
     def register_face(self, name, role, department, embedding, employee_id=None, email=None):
         """註冊新人臉"""
         try:
-            # 生成唯一的 person_id，使用UUID確保絕對唯一性
+            # 生成唯一的 person_id，使用簡潔的英文格式
             import uuid
             unique_suffix = str(uuid.uuid4())[:8]  # 取UUID前8位
             existing_faces = self.get_all_faces()
-            counter = 1
+            
+            # 根據角色生成不同前綴
+            if role == '員工':
+                prefix = 'employee'
+            elif role == '訪客':
+                prefix = 'visitor'
+            else:
+                prefix = role.lower()
             
             # 確保 ID 唯一性
             while True:
-                person_id = f"{role}_{counter:04d}_{unique_suffix}"
+                person_id = f"{prefix}_{unique_suffix}"
                 if person_id not in existing_faces:
                     break
-                counter += 1
                 unique_suffix = str(uuid.uuid4())[:8]  # 重新生成UUID
             
             if hasattr(self, 'use_postgres') and not self.use_postgres:
@@ -182,7 +188,7 @@ class PostgresFaceDatabase:
             
             with self.conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
-                    SELECT person_id, employee_id, name, role, department, email, register_time, embedding
+                    SELECT person_id, employee_id, name, role, department, email, register_time, face_embedding
                     FROM face_profiles
                     WHERE person_id = %s
                 """, (person_id,))
@@ -197,7 +203,7 @@ class PostgresFaceDatabase:
                         'department': row['department'] or '',
                         'email': row['email'] or '',
                         'register_time': row['register_time'],
-                        'embedding': row['embedding']
+                        'embedding': row['face_embedding']
                     }
                 return None
                 

@@ -133,7 +133,7 @@ class RealtimeFaceRecognition:
         # 陌生人確認機制（防止員工誤判）
         self.stranger_candidates = {}  # {face_hash: {'detections': [timestamps], 'embedding': np.array}}
         self.stranger_confirm_threshold = 5  # 連續5次檢測才確認是陌生人
-        self.stranger_confirm_window = 10  # 10秒內的檢測
+        self.stranger_confirm_window = 30  # 30秒內的檢測
         self.recent_success_window = 30  # 30秒內有成功識別就不算陌生人
         
         # 臨時訪客管理
@@ -400,14 +400,52 @@ class RealtimeFaceRecognition:
                             "websocket_stream"
                         )
                         self.recent_recognitions[person_id] = current_time
-                        print(f"📝 記錄識別日誌: {best_match['name']} (信心度: {best_match['confidence']:.3f})")
-                        
-                        # 發送員工識別webhook
-                        await self.send_employee_webhook(best_match, "detected")
+                        # 獲取session_uuid用於日誌顯示
+                        session_info = face_db.get_current_session(person_id)
+                        session_uuid = session_info.get("session_uuid") if session_info else "無session"
+                        print(f"📝 記錄識別日誌: {best_match['name']} (信心度: {best_match['confidence']:.3f}, UUID: {session_uuid})")
                     
                     # 出勤更新：不受冷卻限制，每次識別都更新
+                    is_new_session = False
                     if best_match['confidence'] >= 0.4:
-                        face_db.log_attendance(person_id)
+                        # 先檢查是否已有活躍session
+                        current_session = face_db.get_current_session(person_id)
+                        if not current_session:
+                            is_new_session = True
+                            print(f"📢 檢測到新進場: {best_match['name']}")
+                        
+                        # 更新/建立attendance session
+                        session_uuid = face_db.log_attendance(person_id)
+                        
+                        # 只有新session才發送webhook
+                        if is_new_session and session_uuid:
+                            # 根據role決定推送到哪個webhook
+                            if best_match['role'] == '訪客':
+                                # 訪客推送到陌生人webhook
+                                visitor_data = {
+                                    'event': 'temp_visitor_detected',
+                                    'session_uuid': session_uuid,
+                                    'person_id': best_match['person_id'],
+                                    'name': best_match['name'],
+                                    'department': best_match['department'],
+                                    'role': best_match['role'],
+                                    'employee_id': '',
+                                    'email': '',
+                                    'status': 'active',
+                                    'status_text': '已註冊訪客',
+                                    'arrival_time': datetime.now(TW_TZ).isoformat(),
+                                    'last_seen_at': datetime.now(TW_TZ).isoformat(),
+                                    'timestamp': datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                                    'camera_id': 'websocket_stream',
+                                    'confidence': best_match['confidence']
+                                }
+                                await self.send_stranger_webhook(visitor_data)
+                            else:
+                                # 員工推送到員工webhook
+                                await self.send_employee_webhook(best_match, "detected")
+                    
+                    # 清除可能的陌生人候選（員工從遠處走近的情況）
+                    self.clear_related_stranger_candidates(face.normed_embedding)
                     
                     results.append({
                         'bbox': face.bbox.tolist(),
@@ -447,8 +485,7 @@ class RealtimeFaceRecognition:
                                 temp_visitor_id, temp_visitor_name = await self.register_temp_visitor(face.normed_embedding, current_time)
                                 
                                 if temp_visitor_id:
-                                    # 註冊成功，建立attendance session
-                                    face_db.log_attendance(temp_visitor_id)
+                                    # 註冊成功 (attendance session已在register_temp_visitor中建立)
                                     
                                     results.append({
                                         'bbox': face.bbox.tolist(),
@@ -776,12 +813,12 @@ class RealtimeFaceRecognition:
             return None, None
 
     async def send_employee_webhook(self, person_data, event_type="detected"):
-        """發送員工識別webhook - 照API格式推送"""
+        """發送員工識別webhook - 發送原始資料，讓webhook_receiver包裝API格式"""
         try:
             # 獲取當前session信息 (包含session_uuid)
             session_info = face_db.get_current_session(person_data["person_id"])
             
-            # 照API attendance格式組織數據
+            # 組織員工資料，發送原始事件資料
             payload = {
                 "event": f"employee_{event_type}",
                 "session_uuid": session_info.get("session_uuid") if session_info else None,
@@ -809,19 +846,14 @@ class RealtimeFaceRecognition:
             print(f"❌ 發送員工webhook時發生錯誤: {e}")
 
     async def send_stranger_webhook(self, stranger_data):
-        """發送陌生人檢測webhook"""
+        """發送陌生人檢測webhook - 發送原始資料，讓webhook_receiver包裝API格式"""
         try:
             # 判斷事件類型
             event_type = stranger_data.get('event', 'stranger_detected')
             
-            if event_type == 'stranger_auto_registered':
-                payload = {
-                    "event": "stranger_auto_registered",
-                    "temp_visitor_id": stranger_data["temp_visitor_id"],
-                    "name": stranger_data["name"],
-                    "timestamp": stranger_data["registered_time"],
-                    "camera_id": "websocket_stream"
-                }
+            if event_type in ['stranger_auto_registered', 'temp_visitor_detected']:
+                # 直接發送原始事件資料
+                payload = stranger_data
             elif event_type == 'temp_visitor_departed':
                 payload = {
                     "event": "temp_visitor_departed",
@@ -885,11 +917,26 @@ class RealtimeFaceRecognition:
                 print("🔍 最近有成功識別記錄，可能是員工誤判，不作為陌生人處理")
                 return False, None
             
-            # 生成人臉哈希
-            face_hash = self.generate_face_hash(face_embedding)
+            # 尋找相似的已知陌生人候選
+            similar_hash = None
+            best_similarity = 0.0
+            for existing_hash, candidate_info in self.stranger_candidates.items():
+                similarity = np.dot(face_embedding, candidate_info['embedding'])
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                if similarity > 0.6:  # 降低到0.6閾值
+                    similar_hash = existing_hash
+                    print(f"🔍 找到相似陌生人候選 (相似度: {similarity:.3f})")
+                    break
             
-            # 檢查是否已經在候選列表中
-            if face_hash not in self.stranger_candidates:
+            if not similar_hash and best_similarity > 0:
+                print(f"🔍 最高相似度: {best_similarity:.3f} (未達0.6閾值)")
+            
+            # 如果找到相似的，使用現有hash；否則生成新hash
+            if similar_hash:
+                face_hash = similar_hash
+            else:
+                face_hash = self.generate_face_hash(face_embedding)
                 self.stranger_candidates[face_hash] = {
                     'detections': [],
                     'embedding': face_embedding.copy()
@@ -900,10 +947,14 @@ class RealtimeFaceRecognition:
             
             # 清理過期的檢測記錄
             cutoff_time = current_time - self.stranger_confirm_window
+            before_cleanup = len(self.stranger_candidates[face_hash]['detections'])
             self.stranger_candidates[face_hash]['detections'] = [
                 t for t in self.stranger_candidates[face_hash]['detections'] 
                 if t > cutoff_time
             ]
+            after_cleanup = len(self.stranger_candidates[face_hash]['detections'])
+            if before_cleanup > after_cleanup:
+                print(f"🧹 清理過期檢測: {before_cleanup} → {after_cleanup} (窗口: {self.stranger_confirm_window}秒)")
             
             # 檢查是否達到確認閾值
             detection_count = len(self.stranger_candidates[face_hash]['detections'])
@@ -922,22 +973,29 @@ class RealtimeFaceRecognition:
     async def register_temp_visitor(self, face_embedding, current_time):
         """自動註冊陌生人為臨時訪客"""
         try:
-            # 生成臨時訪客ID
-            temp_visitor_id = f"temp_visitor_{int(current_time)}"
+            # 生成臨時訪客名稱
             temp_visitor_name = f"訪客_{datetime.now().strftime('%m%d_%H%M')}"
             
-            # 註冊到資料庫
+            # 註冊到資料庫 (讓系統自動生成person_id)
             success, message = face_db.register_face(
                 name=temp_visitor_name,
                 role="訪客",
                 department="臨時",
                 embedding=face_embedding,
-                employee_id=temp_visitor_id,
+                employee_id=None,
                 email=""
             )
             
             if success:
                 print(f"✅ 自動註冊臨時訪客: {temp_visitor_name}")
+                
+                # 從message解析person_id: "成功註冊 name（ID: person_id）"
+                import re
+                person_id_match = re.search(r'ID: ([^）]+)', message)
+                if person_id_match:
+                    temp_visitor_id = person_id_match.group(1)
+                else:
+                    temp_visitor_id = f"temp_visitor_{int(current_time)}"
                 
                 # 記錄到臨時訪客管理
                 self.temp_visitors[temp_visitor_id] = {
@@ -946,13 +1004,28 @@ class RealtimeFaceRecognition:
                     'name': temp_visitor_name
                 }
                 
-                # 發送webhook通知
-                await self.send_stranger_webhook({
+                # 建立attendance session並取得UUID
+                session_uuid = face_db.log_attendance(temp_visitor_id)
+                
+                # 發送webhook通知 (API格式)
+                stranger_data = {
                     'event': 'stranger_auto_registered',
-                    'temp_visitor_id': temp_visitor_id,
+                    'session_uuid': session_uuid,
+                    'person_id': temp_visitor_id,
                     'name': temp_visitor_name,
-                    'registered_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                })
+                    'department': '臨時',
+                    'role': '訪客',
+                    'employee_id': temp_visitor_id,
+                    'email': '',
+                    'status': 'active',
+                    'status_text': '陌生訪客',
+                    'arrival_time': datetime.now(TW_TZ).isoformat(),
+                    'last_seen_at': datetime.now(TW_TZ).isoformat(),
+                    'timestamp': datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                    'camera_id': 'websocket_stream',
+                    'confidence': 0.12
+                }
+                await self.send_stranger_webhook(stranger_data)
                 
                 return temp_visitor_id, temp_visitor_name
             else:
@@ -1041,6 +1114,24 @@ class RealtimeFaceRecognition:
             
         except Exception as e:
             print(f"移除臨時訪客時發生錯誤: {e}")
+
+    def clear_related_stranger_candidates(self, face_embedding):
+        """清除與當前人臉相關的陌生人候選（員工從遠處走近被正確識別後）"""
+        try:
+            to_remove = []
+            for existing_hash, candidate_info in self.stranger_candidates.items():
+                similarity = np.dot(face_embedding, candidate_info['embedding'])
+                if similarity > 0.4:  # 與員工識別閾值一致
+                    candidate_count = len(candidate_info['detections'])
+                    print(f"🧹 清除相關陌生人候選: 相似度{similarity:.3f}, 已累積{candidate_count}/5")
+                    to_remove.append(existing_hash)
+            
+            # 清除相關候選
+            for hash_to_remove in to_remove:
+                del self.stranger_candidates[hash_to_remove]
+                
+        except Exception as e:
+            print(f"清除陌生人候選時發生錯誤: {e}")
 
     async def start_cleanup_task(self):
         """啟動清理任務"""
