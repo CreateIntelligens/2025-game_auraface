@@ -65,7 +65,7 @@ try:
             "CPUExecutionProvider"
         ]
     )
-    face_app.prepare(ctx_id=0, det_size=(320, 320))
+    face_app.prepare(ctx_id=0, det_size=(640, 640))  # 高畫質AI處理
     print("✅ AuraFace (GPU) 初始化完成！")
 except Exception as e:
     print(f"⚠️ GPU 初始化失敗，嘗試降級到 CPU: {e}")
@@ -75,7 +75,7 @@ except Exception as e:
             root=".",
             providers=["CPUExecutionProvider"]
         )
-        face_app.prepare(ctx_id=-1, det_size=(320, 320))
+        face_app.prepare(ctx_id=-1, det_size=(640, 640))  # 高畫質AI處理
         print("✅ AuraFace (CPU) 初始化完成！")
     except Exception as cpu_e:
         print(f"❌ CPU 初始化也失敗了: {cpu_e}")

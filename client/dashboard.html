@@ -97,6 +97,7 @@
                 <button id="connectWS" class="btn-success">連接</button>
                 <button id="startCamera" class="btn-primary">啟動鏡頭</button>
                 <button id="stopCamera" class="btn-danger" disabled>停止鏡頭</button>
+                <button id="pipButton" class="btn-info" disabled>📺 子母畫面</button>
             </div>
             <div class="video-wrapper">
                 <video id="videoElement" autoplay muted playsinline></video>
@@ -352,12 +353,17 @@ ${data.faces.map(face =>
         async function startCamera() {
             try {
                 videoStream = await navigator.mediaDevices.getUserMedia({
-                    video: true  // 移除尺寸限制，讓攝像頭使用原生解析度
+                    video: {
+                        width: 1280,
+                        height: 720,
+                        frameRate: 30  // 720p高畫質
+                    }
                 });
                 videoElement.srcObject = videoStream;
                 
                 document.getElementById('startCamera').disabled = true;
                 document.getElementById('stopCamera').disabled = false;
+                document.getElementById('pipButton').disabled = false;
                 
                 // 開始傳送影像幀
                 startStreaming();
@@ -375,6 +381,7 @@ ${data.faces.map(face =>
             
             document.getElementById('startCamera').disabled = false;
             document.getElementById('stopCamera').disabled = true;
+            document.getElementById('pipButton').disabled = true;
             
             // 停止傳送
             stopStreaming();
@@ -409,7 +416,7 @@ ${data.faces.map(face =>
             // 發送原始影像，不翻轉
             ctx.drawImage(videoElement, 0, 0);
             
-            const imageData = canvas.toDataURL('image/jpeg', 0.7);
+            const imageData = canvas.toDataURL('image/jpeg', 0.9);  // 90%高畫質
             
             if (websocket && websocket.readyState === WebSocket.OPEN) {
                 websocket.send(JSON.stringify({
@@ -502,7 +509,7 @@ ${data.faces.map(face =>
             const ctx = canvas.getContext('2d');
             // 註冊時也不翻轉，發送原始影像
             ctx.drawImage(videoElement, 0, 0);
-            const imageData = canvas.toDataURL('image/jpeg', 0.9);
+            const imageData = canvas.toDataURL('image/jpeg', 0.9);  // 90%高畫質
             sendToServer({
                 type: 'register_face',
                 name: name,
@@ -684,10 +691,49 @@ ${data.faces.map(face =>
             }
         }
 
+        // --- Picture-in-Picture Logic ---
+        async function togglePictureInPicture() {
+            try {
+                if (document.pictureInPictureElement) {
+                    // 如果已經在PiP模式，退出
+                    await document.exitPictureInPicture();
+                    document.getElementById('pipButton').textContent = '📺 子母畫面';
+                } else {
+                    // 進入PiP模式
+                    if (videoElement.srcObject) {
+                        await videoElement.requestPictureInPicture();
+                        document.getElementById('pipButton').textContent = '🔙 退出子母畫面';
+                        showNotification('🎥 已開啟子母畫面模式', 'success');
+                    } else {
+                        showNotification('請先啟動攝像頭', 'error');
+                    }
+                }
+            } catch (error) {
+                console.error('PiP錯誤:', error);
+                if (error.name === 'NotSupportedError') {
+                    showNotification('此瀏覽器不支援子母畫面功能', 'error');
+                } else {
+                    showNotification('子母畫面功能啟動失敗', 'error');
+                }
+            }
+        }
+
+        // PiP事件監聽
+        videoElement.addEventListener('enterpictureinpicture', () => {
+            console.log('🎥 進入子母畫面模式');
+            document.getElementById('pipButton').textContent = '🔙 退出子母畫面';
+        });
+
+        videoElement.addEventListener('leavepictureinpicture', () => {
+            console.log('🔙 退出子母畫面模式');
+            document.getElementById('pipButton').textContent = '📺 子母畫面';
+        });
+
         // --- Event Listeners ---
         document.getElementById('connectWS').addEventListener('click', connectWebSocket);
         document.getElementById('startCamera').addEventListener('click', startCamera);
         document.getElementById('stopCamera').addEventListener('click', stopCamera);
+        document.getElementById('pipButton').addEventListener('click', togglePictureInPicture);
         document.getElementById('captureRegister').addEventListener('click', captureForRegistration);
         document.getElementById('refreshPersons').addEventListener('click', loadPersons);
         document.getElementById('roleFilter').addEventListener('change', filterAndDisplayPersons);
